@@ -1,6 +1,13 @@
 from django.contrib import admin
 from django.urls import path
-from core.views import CreateRoomView, JoinRoomView, SessionStatsView, TelemetryView
+from core.views import (
+    CreateRoomView, 
+    JoinRoomView, 
+    SessionStatsView, 
+    TelemetryView, 
+    EngagementPulseView, 
+    AICoachView
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -8,4 +15,6 @@ urlpatterns = [
     path('api/rooms/join/', JoinRoomView.as_view(), name='room-join'),
     path('api/rooms/<str:room_code>/stats/', SessionStatsView.as_view(), name='session-stats'),
     path('api/rooms/<str:room_code>/telemetry/', TelemetryView.as_view(), name='session-telemetry'),
+    path('api/rooms/<str:room_code>/engagement/', EngagementPulseView.as_view(), name='session-engagement'),
+    path('api/rooms/<str:room_code>/coach/', AICoachView.as_view(), name='session-coach'),
 ]

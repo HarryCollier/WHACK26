@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import React from 'react';
 import Lobby from '../components/Lobby';
 import Whiteboard from '../components/Whiteboard';
+import AICoachPanel, { LiveEngagementBadge } from '../components/AICoachPanel';
 import { STREAM_CONFIG } from '../config/streamConfig';
 
 describe('STREAM_CONFIG', () => {
@@ -100,5 +101,46 @@ describe('Whiteboard Component', () => {
     expect(screen.getByText('Maths')).toBeInTheDocument();
     expect(screen.getByTitle('Full RGB Color Control')).toBeInTheDocument();
     expect(screen.getByTitle('Eraser Modes')).toBeInTheDocument();
+  });
+});
+
+describe('AI Coach & Engagement Components', () => {
+  it('renders LiveEngagementBadge and handles click', () => {
+    const handleClick = vi.fn();
+    render(<LiveEngagementBadge roomCode="TEST1" role="tutor" onClick={handleClick} />);
+    
+    const badge = screen.getByRole('button');
+    expect(badge).toBeInTheDocument();
+    fireEvent.click(badge);
+    expect(handleClick).toHaveBeenCalled();
+  });
+
+  it('renders AICoachPanel with pedagogical coaching metrics', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        summary: "Balanced lesson flow with strong student participation.",
+        comprehension_rating: "High",
+        comprehension_score: 88,
+        pacing: {
+          tutor_talk_pct: 60,
+          student_talk_pct: 40,
+          status: "Balanced",
+          advice: "Good pacing and wait time."
+        },
+        friction_points: [],
+        whiteboard_feedback: "Active whiteboard diagramming.",
+        actionable_tips: ["Keep up the interactive questions."]
+      })
+    });
+
+    render(<AICoachPanel roomCode="TEST1" role="tutor" isOpen={true} onClose={vi.fn()} />);
+
+    expect(screen.getByText(/AI Pedagogical Coach/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/Balanced lesson flow/i)).toBeInTheDocument();
+      expect(screen.getByText(/88\/100/i)).toBeInTheDocument();
+      expect(screen.getByText(/Talk-Time Split/i)).toBeInTheDocument();
+    });
   });
 });

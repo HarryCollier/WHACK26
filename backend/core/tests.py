@@ -471,3 +471,89 @@ class MultimodalExtractorsUnitTest(TestCase):
         # Cleanup
         store.wipe_session()
         del manager.rooms["DUAL_FEED_TEST"]
+
+
+class AICoachAndEngagementTests(TestCase):
+    def setUp(self):
+        self.manager = SessionManager.get_instance()
+        self.client = Client()
+
+    def test_rolling_engagement_and_coach_endpoints(self):
+        room_code = "COACH_TEST"
+        store = self.manager.get_or_create(room_code)
+        store.active_peers.add("tutor_1")
+        store.active_peers.add("student_1")
+
+        # Add dialogue
+        store.transcripts.append(TranscriptEntry(
+            role="tutor",
+            client_id="tutor_1",
+            timestamp=1000,
+            text="Today we are solving linear equations using substitution method."
+        ))
+        store.transcripts.append(TranscriptEntry(
+            role="student",
+            client_id="student_1",
+            timestamp=2000,
+            text="Okay, I understand the first part."
+        ))
+
+        # Add simulated student video frame features
+        store.video_frame_features["student"].append({
+            "timestamp_ms": 1500,
+            "face_detected": True,
+            "engagement_score": 0.82,
+            "engagement_label": "high",
+            "attention_state": "attentive_screen",
+            "brow_furrow_score": 0.1,
+            "smile_score": 0.2,
+            "head_yaw_deg": 1.2,
+            "head_pitch_deg": -2.0,
+            "gaze_direction": "screen"
+        })
+
+        # 1. Test rolling engagement helper
+        from core.telemetry import get_rolling_engagement
+        pulse = get_rolling_engagement(store, window_seconds=15)
+        self.assertEqual(pulse["engagement_score"], 82)
+        self.assertEqual(pulse["status_color"], "green")
+        self.assertEqual(pulse["attention_state"], "attentive")
+        self.assertTrue(pulse["student_face_detected"])
+        self.assertIn("pacing", pulse)
+
+        # 2. Test GET /api/rooms/<room_code>/engagement/
+        res_eng = self.client.get(reverse('session-engagement', kwargs={'room_code': room_code}))
+        self.assertEqual(res_eng.status_code, 200)
+        self.assertEqual(res_eng.json()["engagement_score"], 82)
+
+        # 3. Test generate_coaching_report
+        from core.telemetry import build_telemetry_payload
+        from core.llm_coach import generate_coaching_report
+        payload = build_telemetry_payload(store)
+        report = generate_coaching_report(payload)
+
+        self.assertIn("summary", report)
+        self.assertIn("comprehension_rating", report)
+        self.assertIn("pacing", report)
+        self.assertIn("actionable_tips", report)
+
+        # 4. Test GET & POST /api/rooms/<room_code>/coach/
+        res_coach = self.client.post(
+            reverse('session-coach', kwargs={'room_code': room_code}),
+            data=json.dumps({}),
+            content_type="application/json"
+        )
+        self.assertEqual(res_coach.status_code, 200)
+        report_data = res_coach.json()
+        self.assertIn("comprehension_rating", report_data)
+        self.assertIn("pacing", report_data)
+
+        # GET should retrieve cached report
+        res_cached = self.client.get(reverse('session-coach', kwargs={'room_code': room_code}))
+        self.assertEqual(res_cached.status_code, 200)
+        self.assertEqual(res_cached.json()["summary"], report_data["summary"])
+
+        # Cleanup
+        store.wipe_session()
+        del self.manager.rooms[room_code]
+

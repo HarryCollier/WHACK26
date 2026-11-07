@@ -298,3 +298,108 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
     ]
 
     return "\n".join(lines)
+
+
+def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) -> dict:
+    """
+    Computes a deterministic, real-time engagement indicator for the tutor
+    based on the student's telemetry over the last `window_seconds`.
+    """
+    student_frames = store.video_frame_features.get("student", [])
+    now_ms = int(time.time() * 1000)
+
+    # 1. Filter frames in the recent window
+    if student_frames:
+        latest_ts = max(f.get("timestamp_ms", 0) for f in student_frames)
+        cutoff_ts = max(0, latest_ts - window_seconds * 1000)
+        recent_frames = [f for f in student_frames if f.get("timestamp_ms", 0) >= cutoff_ts]
+        if not recent_frames:
+            recent_frames = student_frames[-10:]
+    else:
+        recent_frames = []
+
+    # 2. Analyze faces & engagement
+    faces = [f for f in recent_frames if f.get("face_detected")]
+
+    if not recent_frames or not faces:
+        has_raw_frames = len(store.video_frames.get("student", [])) > 0
+        return {
+            "engagement_score": 0,
+            "status_label": "No Student Face Detected" if has_raw_frames else "Waiting for Student Video",
+            "status_color": "gray",
+            "attention_state": "no_face",
+            "student_face_detected": False,
+            "brow_furrow_level": 0.0,
+            "gaze_direction": "unknown",
+            "actionable_hint": "Check if student camera is enabled and visible.",
+            "pacing": _get_talk_time_pacing(store),
+            "timestamp_ms": now_ms
+        }
+
+    # Scores
+    scores = [f["engagement_score"] for f in faces if f.get("engagement_score") is not None]
+    avg_score = _safe_mean(scores) if scores else 0.5
+    furrows = [f.get("brow_furrow_score", 0) for f in faces]
+    avg_furrow = _safe_mean(furrows) or 0.0
+
+    # Count attention states
+    confused_count = sum(1 for f in faces if f.get("attention_state") == "confused_furrow" or f.get("brow_furrow_score", 0) > 0.40)
+    away_count = sum(1 for f in faces if f.get("gaze_direction") not in ("screen", "unknown"))
+
+    pct_confused = confused_count / len(faces)
+    pct_away = away_count / len(faces)
+
+    recent_gaze = faces[-1].get("gaze_direction", "screen")
+
+    # Determine status & badge
+    if pct_confused >= 0.35 or avg_furrow > 0.45:
+        status_label = "Student May Be Confused"
+        status_color = "red"
+        attention_state = "confused"
+        hint = "Elevated brow furrow detected. Pause and ask a check-in question."
+    elif pct_away >= 0.45 or avg_score < 0.40:
+        status_label = "Student Looking Away"
+        status_color = "yellow"
+        attention_state = "distracted"
+        hint = "Student attention is off-screen. Prompt them to engage with the whiteboard."
+    elif avg_score >= 0.65:
+        status_label = "Attentive & Engaged"
+        status_color = "green"
+        attention_state = "attentive"
+        hint = "Student is focused on the screen. Great pacing."
+    else:
+        status_label = "Moderate Attention"
+        status_color = "yellow"
+        attention_state = "moderate"
+        hint = "Ask an open-ended question to boost participation."
+
+    return {
+        "engagement_score": round(avg_score * 100),
+        "status_label": status_label,
+        "status_color": status_color,
+        "attention_state": attention_state,
+        "student_face_detected": True,
+        "brow_furrow_level": round(avg_furrow, 2),
+        "gaze_direction": recent_gaze,
+        "actionable_hint": hint,
+        "pacing": _get_talk_time_pacing(store),
+        "timestamp_ms": now_ms
+    }
+
+
+def _get_talk_time_pacing(store: "RoomSessionStore") -> dict:
+    tutor_words = sum(len(t.text.split()) for t in store.transcripts if t.role == "tutor")
+    student_words = sum(len(t.text.split()) for t in store.transcripts if t.role == "student")
+    total_words = tutor_words + student_words
+    if total_words > 0:
+        tutor_pct = round(100 * tutor_words / total_words)
+        student_pct = 100 - tutor_pct
+    else:
+        tutor_pct = 50
+        student_pct = 50
+    return {
+        "tutor_talk_pct": tutor_pct,
+        "student_talk_pct": student_pct,
+        "total_words": total_words
+    }
+

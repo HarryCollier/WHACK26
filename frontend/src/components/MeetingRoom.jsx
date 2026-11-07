@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity } from 'lucide-react';
+import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles } from 'lucide-react';
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
 import DiagnosticsModal from './DiagnosticsModal';
+import AICoachPanel, { LiveEngagementBadge } from './AICoachPanel';
 
 const MeetingRoom = ({ session, onLeave }) => {
   const { roomCode, title, role } = session;
@@ -14,6 +15,7 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [peerPresence, setPeerPresence] = useState('Waiting for student/tutor...');
   const [transcripts, setTranscripts] = useState([]);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showAICoach, setShowAICoach] = useState(false);
 
   const whiteboardRef = useRef(null);
   const clientId = useRef(`${role}_${Math.random().toString(36).substring(2, 9)}`).current;
@@ -168,9 +170,41 @@ const MeetingRoom = ({ session, onLeave }) => {
             <Users size={14} />
             <span>{peerPresence}</span>
           </div>
+
+          {/* Tutor Live Engagement Indicator */}
+          {role === 'tutor' && (
+            <LiveEngagementBadge
+              roomCode={roomCode}
+              socket={socket}
+              role={role}
+              onClick={() => setShowAICoach(true)}
+            />
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {/* AI Coach Button for Tutor */}
+          {role === 'tutor' && (
+            <button
+              onClick={() => setShowAICoach(true)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: '6px',
+                backgroundColor: '#312e81',
+                color: '#c7d2fe',
+                fontSize: '12px',
+                fontWeight: 600,
+                border: '1px solid #4338ca',
+                cursor: 'pointer'
+              }}>
+              <Sparkles size={14} color="#a855f7" />
+              AI Coach
+            </button>
+          )}
+
           <button
             onClick={() => setShowDiagnostics(true)}
             style={{
@@ -257,6 +291,15 @@ const MeetingRoom = ({ session, onLeave }) => {
         roomCode={roomCode}
         isOpen={showDiagnostics}
         onClose={() => setShowDiagnostics(false)}
+      />
+
+      {/* AI Pedagogical Coach Drawer / Panel */}
+      <AICoachPanel
+        roomCode={roomCode}
+        socket={socket}
+        role={role}
+        isOpen={showAICoach}
+        onClose={() => setShowAICoach(false)}
       />
     </div>
   );

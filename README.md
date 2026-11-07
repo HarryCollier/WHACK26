@@ -19,14 +19,41 @@ A custom tutoring space featuring real-time collaborative whiteboard, WebRTC vid
 - **Lobby UI** ([`frontend/src/components/Lobby.jsx`](file:///c:/Users/snowb/PROG/whack26/WHACK26/frontend/src/components/Lobby.jsx)):
   - Tabbed interface for creating (Tutor) and joining (Student) rooms.
 - **Custom Whiteboard** ([`frontend/src/components/Whiteboard.jsx`](file:///c:/Users/snowb/PROG/whack26/WHACK26/frontend/src/components/Whiteboard.jsx)):
-  - Pen, highlighter, eraser, color palette, adjustable stroke sizes, clear board, snapshot export.
-  - Resolution-independent coordinate normalization across screen sizes.
+  - Smooth vector freehand drawing, geometric shapes, protractor, ruler, calculator, Paint.NET HSV square color picker, zoom/pan navigation, sweep line eraser, lasso eraser.
 - **Video & Audio Calling** ([`frontend/src/components/VideoCall.jsx`](file:///c:/Users/snowb/PROG/whack26/WHACK26/frontend/src/components/VideoCall.jsx)):
   - WebRTC peer-to-peer audio and video connection.
   - In-browser Web Audio API real-time speech energy detection and volume visualizer.
   - Microphone mute/unmute and video toggle.
+- **AI Pedagogical Coach & Engagement Pulse** ([`frontend/src/components/AICoachPanel.jsx`](file:///c:/Users/snowb/PROG/whack26/WHACK26/frontend/src/components/AICoachPanel.jsx)):
+  - Real-time 15s rolling student engagement badge in the tutor's top bar (Attentive, Confused, Off-screen).
+  - Deep coaching drawer: comprehension scoring, talk-time pacing meter, timestamped friction moments, whiteboard critique, actionable next steps.
+  - Pluggable LLM support: Google Gemini 2.0/1.5 Flash (Free Tier), OpenAI GPT-4o-mini, Local Ollama, and built-in Heuristic Engine.
 - **Stream Ingestion Dispatcher** ([`frontend/src/components/StreamDispatcher.jsx`](file:///c:/Users/snowb/PROG/whack26/WHACK26/frontend/src/components/StreamDispatcher.jsx)):
-  - Tags and streams periodic audio slices (`MediaRecorder`), video frames, and canvas snapshots to the backend for future AI processing.
+  - Tags and streams periodic audio slices (`MediaRecorder`), video frames, and canvas snapshots to the backend for AI processing.
+
+---
+
+## AI Feedback & LLM Configuration
+
+The backend supports zero-setup operation out of the box using an intelligent Heuristic Engine, or live Cloud/Local LLMs by setting environment variables in `backend/.env` or configuring them in the UI settings drawer:
+
+```env
+# Optional: Set LLM Provider ("gemini", "openai", "ollama", or "auto")
+LLM_PROVIDER=auto
+
+# Google Gemini (Recommended - Free on Google AI Studio up to 15 RPM)
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-2.0-flash
+
+# OpenAI
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-4o-mini
+
+# Ollama (Local completely offline)
+OLLAMA_ENABLED=true
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1
+```
 
 ---
 

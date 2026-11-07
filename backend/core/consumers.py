@@ -82,6 +82,33 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "pong"})
             return
 
+        if msg_type == "request_engagement_pulse":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            from .telemetry import get_rolling_engagement
+            pulse = get_rolling_engagement(store)
+            await self.send_json({
+                "type": "engagement_pulse",
+                "data": pulse
+            })
+            return
+
+        if msg_type == "request_coaching_report":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            from .telemetry import build_telemetry_payload
+            from .llm_coach import generate_coaching_report
+            api_key = content.get("apiKey")
+            provider = content.get("provider")
+            payload = build_telemetry_payload(store)
+            report = generate_coaching_report(payload, api_key=api_key, provider_override=provider)
+            store.add_coaching_report(report)
+            await self.send_json({
+                "type": "coaching_report",
+                "data": report
+            })
+            return
+
         if msg_type == "join":
             self.role = content.get("role", "guest")
             self.client_id = content.get("clientId")

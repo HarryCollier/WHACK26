@@ -115,6 +115,11 @@ class RoomSessionStore:
     # Acoustic features keyed by transcript entry timestamp
     audio_features_by_chunk: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
+    # 4. Pedagogical Coaching reports history
+    coaching_reports: List[Dict[str, Any]] = field(default_factory=list)
+    last_coaching_report: Optional[Dict[str, Any]] = None
+    last_coaching_timestamp: int = 0
+
     # Audio transcription queue and background thread
     audio_queue: queue.Queue = field(default_factory=queue.Queue)
     is_running: bool = True
@@ -280,6 +285,12 @@ class RoomSessionStore:
     def add_audio_chunk(self, role: str, client_id: str, timestamp: int, b64_audio: str):
         self.audio_queue.put((role, client_id, timestamp, b64_audio))
 
+    def add_coaching_report(self, report: Dict[str, Any]):
+        self.coaching_reports.append(report)
+        self.last_coaching_report = report
+        import time
+        self.last_coaching_timestamp = int(time.time() * 1000)
+
     def wipe_session(self):
         """Immediately destroys all session data from memory when all peers leave"""
         self.is_running = False
@@ -291,6 +302,8 @@ class RoomSessionStore:
         self.video_frame_features.clear()
         self.transcripts.clear()
         self.audio_features_by_chunk.clear()
+        self.coaching_reports.clear()
+        self.last_coaching_report = None
         self.active_peers.clear()
         logger.info(f"Session data for room {self.room_code} completely wiped from memory.")
 

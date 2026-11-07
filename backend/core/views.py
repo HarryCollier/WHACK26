@@ -1,9 +1,12 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+import logging
 from .models import MeetingRoom
 from .session_store import SessionManager
-from .telemetry import build_telemetry_payload
+from .telemetry import build_telemetry_payload, get_rolling_engagement
+
+logger = logging.getLogger(__name__)
 
 class CreateRoomView(APIView):
     def post(self, request):
@@ -129,3 +132,88 @@ class TelemetryView(APIView):
                 'error': str(e),
                 'room_code': room_code
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class EngagementPulseView(APIView):
+    """
+    Returns the real-time (15-second rolling) engagement indicator for a live session.
+    URL: /api/rooms/<room_code>/engagement/
+    """
+    def get(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            return Response({
+                'active': False,
+                'room_code': room_code,
+                'message': 'No active in-memory session for this room code.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        store = manager.rooms[room_code]
+        try:
+            pulse = get_rolling_engagement(store, window_seconds=15)
+            return Response(pulse, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e), 'room_code': room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AICoachView(APIView):
+    """
+    Returns or triggers a deep pedagogical coaching report from the LLM.
+    URL: /api/rooms/<room_code>/coach/
+    GET: returns latest cached coaching report (or generates one if none exists)
+    POST: triggers immediate on-demand LLM coaching analysis
+    """
+    def get(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            return Response({
+                'active': False,
+                'room_code': room_code,
+                'message': 'No active in-memory session for this room code.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        store = manager.rooms[room_code]
+        if store.last_coaching_report:
+            return Response(store.last_coaching_report, status=status.HTTP_200_OK)
+
+        # Generate fresh report if none cached
+        return self._generate(request, store)
+
+    def post(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            return Response({
+                'active': False,
+                'room_code': room_code,
+                'message': 'No active in-memory session for this room code.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        store = manager.rooms[room_code]
+        return self._generate(request, store)
+
+    def _generate(self, request, store):
+        from .llm_coach import generate_coaching_report
+        api_key = None
+        provider = None
+        if hasattr(request, 'data') and request.method == 'POST':
+            api_key = request.data.get('apiKey')
+            provider = request.data.get('provider')
+        elif hasattr(request, 'query_params'):
+            api_key = request.query_params.get('apiKey')
+            provider = request.query_params.get('provider')
+        elif hasattr(request, 'GET'):
+            api_key = request.GET.get('apiKey')
+            provider = request.GET.get('provider')
+
+        try:
+            payload = build_telemetry_payload(store)
+            report = generate_coaching_report(payload, api_key=api_key, provider_override=provider)
+            store.add_coaching_report(report)
+            return Response(report, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error in AICoachView: {e}")
+            return Response({'error': str(e), 'room_code': store.room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
