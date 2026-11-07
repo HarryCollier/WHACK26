@@ -113,6 +113,10 @@ class RoomSessionStore:
     all_whiteboards_history: List[Dict[str, Any]] = field(default_factory=list)
     # Whiteboard delta features computed each time a new snapshot arrives
     whiteboard_deltas: List[Dict[str, Any]] = field(default_factory=list)
+    # Whiteboard element events logged by role (strokes, shapes, text)
+    whiteboard_elements_log: List[Dict[str, Any]] = field(default_factory=list)
+    student_whiteboard_edit_count: int = 0
+    tutor_whiteboard_edit_count: int = 0
 
     # 2. Video frames store: 0.5s snapshots partitioned by role
     video_frames: Dict[str, List[VideoFrameEntry]] = field(default_factory=lambda: {"tutor": [], "student": []})
@@ -304,6 +308,31 @@ class RoomSessionStore:
             self.all_whiteboards_history.append(self.most_recent_whiteboard)
         self.most_recent_whiteboard = new_data
 
+    def record_whiteboard_element(self, element: Dict[str, Any], role: str, client_id: str, action: str = "create"):
+        """Records granular whiteboard contributions tagged by role (student vs tutor)"""
+        import time
+        now_ms = int(time.time() * 1000)
+        entry = {
+            "timestamp": now_ms,
+            "role": role or "unknown",
+            "client_id": client_id,
+            "action": action,
+            "element_id": element.get("id"),
+            "element_type": element.get("type"),
+            "tool": element.get("tool"),
+            "shape_type": element.get("shapeType"),
+            "text": element.get("text"),
+            "color": element.get("color")
+        }
+        self.whiteboard_elements_log.append(entry)
+        if len(self.whiteboard_elements_log) > 200:
+            self.whiteboard_elements_log = self.whiteboard_elements_log[-100:]
+
+        if role == "student":
+            self.student_whiteboard_edit_count += 1
+        elif role == "tutor":
+            self.tutor_whiteboard_edit_count += 1
+
     def add_video_frame(self, role: str, client_id: str, timestamp: int, data_url: str):
         if role not in self.video_frames:
             self.video_frames[role] = []
@@ -346,6 +375,9 @@ class RoomSessionStore:
         self.most_recent_whiteboard = None
         self.all_whiteboards_history.clear()
         self.whiteboard_deltas.clear()
+        self.whiteboard_elements_log.clear()
+        self.student_whiteboard_edit_count = 0
+        self.tutor_whiteboard_edit_count = 0
         self.video_frames.clear()
         self.video_frame_features.clear()
         self.transcripts.clear()

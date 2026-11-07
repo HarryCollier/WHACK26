@@ -129,7 +129,7 @@ function isPointInPolygon(px, py, polygon) {
   return inside;
 }
 
-const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
+const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = '' }, ref) => {
   const canvasRef = useRef(null);
   const isDrawing = useRef(false);
 
@@ -242,26 +242,63 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
 
-      // When zoomed or panned, generate a normalized 1.0x full-board render for pristine AI telemetry
-      if (zoom !== 1.0 || pan.x !== 0 || pan.y !== 0) {
-        const offscreen = document.createElement('canvas');
-        const rect = canvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        offscreen.width = Math.round(rect.width * dpr);
-        offscreen.height = Math.round(rect.height * dpr);
-        const offCtx = offscreen.getContext('2d');
-        offCtx.scale(dpr, dpr);
-        offCtx.fillStyle = BOARD_BG_COLOR;
-        offCtx.fillRect(0, 0, rect.width, rect.height);
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width > 0 ? rect.width : 960;
+      const h = rect.height > 0 ? rect.height : 600;
 
-        // Render elements at standard scale
-        for (const el of elementsRef.current) {
-          renderElementToCtx(offCtx, el);
-        }
-        return offscreen.toDataURL('image/jpeg', 0.8);
+      // Reserve 28px at the top for the AI visual legend header
+      const headerH = 28;
+      const scale = Math.min(1.0, 960 / w, 580 / h);
+      const targetW = Math.max(380, Math.round(w * scale));
+      const targetH = Math.max(260, Math.round(h * scale) + headerH);
+
+      const offscreen = document.createElement('canvas');
+      offscreen.width = targetW;
+      offscreen.height = targetH;
+      const offCtx = offscreen.getContext('2d');
+      if (!offCtx) return null;
+
+      // Solid background
+      offCtx.fillStyle = BOARD_BG_COLOR;
+      offCtx.fillRect(0, 0, targetW, targetH);
+
+      // Draw explicit AI role legend header
+      offCtx.save();
+      offCtx.fillStyle = '#ffffff';
+      offCtx.fillRect(0, 0, targetW, headerH);
+      offCtx.strokeStyle = '#cbd5e1';
+      offCtx.lineWidth = 1;
+      offCtx.strokeRect(0, 0, targetW, headerH);
+
+      // Tutor legend badge (Black / Slate)
+      offCtx.fillStyle = '#0f172a';
+      offCtx.fillRect(10, 7, 14, 14);
+      offCtx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+      offCtx.fillStyle = '#0f172a';
+      offCtx.fillText('TUTOR (Questions/Prompts)', 28, 18);
+
+      // Student legend badge (Emerald Green)
+      offCtx.fillStyle = '#059669';
+      offCtx.fillRect(220, 7, 14, 14);
+      offCtx.fillStyle = '#059669';
+      offCtx.fillText('PUPIL (Answers/Work)', 238, 18);
+      offCtx.restore();
+
+      // Translate below the legend header & scale to world coordinates
+      offCtx.save();
+      offCtx.translate(0, headerH);
+      offCtx.scale(scale, scale);
+
+      // Render all vector elements cleanly in world coordinates with role color coding
+      for (const el of elementsRef.current) {
+        // Color-code: Tutor = #0f172a (Black/Slate), Student = #059669 (Emerald Green)
+        const isStudent = el.role === 'student';
+        const roleColor = isStudent ? '#059669' : '#0f172a';
+        renderElementToCtx(offCtx, el, roleColor);
       }
+      offCtx.restore();
 
-      return canvas.toDataURL('image/jpeg', 0.8);
+      return offscreen.toDataURL('image/jpeg', 0.8);
     },
     clearBoard: () => {
       handleClear(true);
@@ -389,10 +426,12 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
   };
 
   // Render a single vector element (coordinates are in world space)
-  const renderElementToCtx = (ctx, el) => {
+  const renderElementToCtx = (ctx, el, colorOverride = null) => {
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+
+    const drawColor = colorOverride || el.color;
 
     if (el.tool === 'eraser') {
       ctx.strokeStyle = BOARD_BG_COLOR;
@@ -400,13 +439,13 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       ctx.lineWidth = el.size * 3.5;
       ctx.globalAlpha = 1.0;
     } else if (el.tool === 'highlighter') {
-      ctx.strokeStyle = el.color;
-      ctx.fillStyle = el.color;
+      ctx.strokeStyle = drawColor;
+      ctx.fillStyle = drawColor;
       ctx.lineWidth = el.size * 3.5;
       ctx.globalAlpha = 0.35;
     } else {
-      ctx.strokeStyle = el.color;
-      ctx.fillStyle = el.color;
+      ctx.strokeStyle = drawColor;
+      ctx.fillStyle = drawColor;
       ctx.lineWidth = el.size;
       ctx.globalAlpha = 1.0;
     }
@@ -480,7 +519,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         ctx.stroke();
       }
     } else if (el.type === 'text') {
-      ctx.fillStyle = '#0f172a';
+      ctx.fillStyle = drawColor || '#0f172a';
       ctx.font = 'bold 16px monospace';
       ctx.fillText(el.text, el.x, el.y);
     }
@@ -1168,7 +1207,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
           start: startWorld,
           end: wPos,
           color,
-          size
+          size,
+          role,
+          clientId
         };
         elementsRef.current.push(newShape);
         pushUndoAction({ type: 'add', element: newShape });
@@ -1177,7 +1218,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({
             type: 'whiteboard_element',
-            element: newShape
+            element: newShape,
+            role,
+            clientId
           }));
         }
       }
@@ -1198,7 +1241,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         color,
         size,
         isDot: true,
-        points: [p]
+        points: [p],
+        role,
+        clientId
       };
       elementsRef.current.push(newDotElement);
       pushUndoAction({ type: 'add', element: newDotElement });
@@ -1207,7 +1252,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
           type: 'whiteboard_element',
-          element: newDotElement
+          element: newDotElement,
+          role,
+          clientId
         }));
       }
 
@@ -1232,7 +1279,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         tool,
         color,
         size,
-        points: [...pts]
+        points: [...pts],
+        role,
+        clientId
       };
       elementsRef.current.push(newStrokeElement);
       pushUndoAction({ type: 'add', element: newStrokeElement });
@@ -1240,7 +1289,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
           type: 'whiteboard_element',
-          element: newStrokeElement
+          element: newStrokeElement,
+          role,
+          clientId
         }));
       }
 
@@ -1310,7 +1361,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       type: 'text',
       text,
       x: centerWorld.x - 60,
-      y: centerWorld.y
+      y: centerWorld.y,
+      role,
+      clientId
     };
     elementsRef.current.push(newTextElement);
     pushUndoAction({ type: 'add', element: newTextElement });
@@ -1319,7 +1372,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({
         type: 'whiteboard_element',
-        element: newTextElement
+        element: newTextElement,
+        role,
+        clientId
       }));
     }
   };

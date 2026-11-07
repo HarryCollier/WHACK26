@@ -141,13 +141,18 @@ def build_telemetry_payload(store: "RoomSessionStore") -> dict:
     # ──────────────────────────────────────────────────────────────────────────
     # 3. WHITEBOARD TELEMETRY
     #    Summary of whiteboard activity across the whole session.
-    #    Includes per-snapshot deltas so the LLM can see when big edits happened.
+    #    Includes per-snapshot deltas so the LLM can see when big edits happened,
+    #    plus role-tagged contribution breakdown and current snapshot for visual inspection.
     # ──────────────────────────────────────────────────────────────────────────
     whiteboard_telemetry = {
         "total_snapshots": len(store.all_whiteboards_history) + (1 if store.most_recent_whiteboard else 0),
         "has_current": store.most_recent_whiteboard is not None,
         "delta_history": store.whiteboard_deltas,
         "summary": _summarise_whiteboard_deltas(store.whiteboard_deltas),
+        "student_edits": getattr(store, "student_whiteboard_edit_count", 0),
+        "tutor_edits": getattr(store, "tutor_whiteboard_edit_count", 0),
+        "recent_elements_log": getattr(store, "whiteboard_elements_log", [])[-15:],
+        "current_data_url": store.most_recent_whiteboard.get("dataUrl") if store.most_recent_whiteboard else None,
     }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -272,15 +277,27 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
                 gz = point.get("gaze", "")
                 lines.append(f"      t={ts}ms  score={sc}  label={lbl}  gaze={gz}")
 
-    lines += ["", "--- WHITEBOARD ACTIVITY ---"]
+    lines += ["", "--- WHITEBOARD ACTIVITY & PUPIL CONTRIBUTIONS ---"]
     ws = whiteboard_telemetry
     lines.append(f"  Total snapshots : {ws.get('total_snapshots', 0)}")
+    lines.append(f"  Student edits   : {ws.get('student_edits', 0)}")
+    lines.append(f"  Tutor edits     : {ws.get('tutor_edits', 0)}")
+    if ws.get("current_data_url"):
+        lines.append("  Visual Status   : [Whiteboard snapshot image is attached. COLOR CODING: Black=Tutor prompts/questions, Green=Pupil answers/work. Attribute questions to tutor and answers to pupil.]")
     summ = ws.get("summary", {})
     lines.append(f"  Major edits     : {summ.get('major_edits', 0)}")
     lines.append(f"  Idle snapshots  : {summ.get('idle_snapshots', 0)}")
     avg_chg = summ.get("avg_change_percent")
     if avg_chg is not None:
         lines.append(f"  Avg change/snap : {avg_chg:.1f}%")
+    if ws.get("recent_elements_log"):
+        lines.append("  Recent element actions:")
+        for el in ws["recent_elements_log"][-8:]:
+            r = el.get("role", "unknown").upper()
+            act = el.get("action", "action")
+            etype = el.get("element_type") or el.get("tool") or "stroke"
+            txt = f" text=\"{el.get('text')}\"" if el.get("text") else ""
+            lines.append(f"    [{r}] {act} {etype}{txt}")
     if ws.get("delta_history"):
         lines.append("  Delta log (most recent 5):")
         for d in ws["delta_history"][-5:]:
@@ -351,8 +368,21 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
 
     recent_gaze = faces[-1].get("gaze_direction", "screen")
 
+    # Check recent student whiteboard participation
+    student_wb_edits = getattr(store, "student_whiteboard_edit_count", 0)
+    recent_wb_elements = getattr(store, "whiteboard_elements_log", [])
+    recent_student_actions = [
+        el for el in recent_wb_elements
+        if el.get("role") == "student" and (now_ms - el.get("timestamp", 0)) <= window_seconds * 1000
+    ]
+
     # Determine status & badge
-    if pct_confused >= 0.35 or avg_furrow > 0.45:
+    if len(recent_student_actions) > 0:
+        status_label = "Student Writing on Whiteboard"
+        status_color = "green"
+        attention_state = "attentive"
+        hint = "Pupil is actively contributing to the whiteboard in response to the session."
+    elif pct_confused >= 0.35 or avg_furrow > 0.45:
         status_label = "Student May Be Confused"
         status_color = "red"
         attention_state = "confused"
@@ -381,6 +411,8 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         "student_face_detected": True,
         "brow_furrow_level": round(avg_furrow, 2),
         "gaze_direction": recent_gaze,
+        "student_wb_active": len(recent_student_actions) > 0,
+        "student_total_wb_edits": student_wb_edits,
         "actionable_hint": hint,
         "pacing": _get_talk_time_pacing(store),
         "timestamp_ms": now_ms

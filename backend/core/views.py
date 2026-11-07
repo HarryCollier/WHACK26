@@ -216,11 +216,15 @@ class AICoachView(APIView):
 
     def _generate(self, request, store):
         from .llm_coach import generate_coaching_report
+        import time
         api_key = None
         provider = None
         if hasattr(request, 'data') and request.method == 'POST':
             api_key = request.data.get('apiKey')
             provider = request.data.get('provider')
+            wb_snapshot = request.data.get('whiteboardSnapshot')
+            if wb_snapshot:
+                store.update_whiteboard(wb_snapshot, int(time.time() * 1000), 'client')
         elif hasattr(request, 'query_params'):
             api_key = request.query_params.get('apiKey')
             provider = request.query_params.get('provider')
