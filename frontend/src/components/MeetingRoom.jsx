@@ -1,23 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LogOut, Copy, Check, Users, Radio } from 'lucide-react';
+import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity } from 'lucide-react';
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
+import DiagnosticsModal from './DiagnosticsModal';
 
 const MeetingRoom = ({ session, onLeave }) => {
   const { roomCode, title, role } = session;
   const [socket, setSocket] = useState(null);
   const [copied, setCopied] = useState(false);
   const [localStream, setLocalStream] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting' | 'connected' | 'disconnected'
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [peerPresence, setPeerPresence] = useState('Waiting for student/tutor...');
+  const [transcripts, setTranscripts] = useState([]);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   const whiteboardRef = useRef(null);
   const clientId = useRef(`${role}_${Math.random().toString(36).substring(2, 9)}`).current;
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const transcriptEndRef = useRef(null);
 
-  // WebSocket connection with automatic reconnect resilience
   useEffect(() => {
     let isMounted = true;
 
@@ -29,7 +32,6 @@ const MeetingRoom = ({ session, onLeave }) => {
       ws.onopen = () => {
         if (!isMounted) return;
         setConnectionStatus('connected');
-        // Register role and client identity
         ws.send(JSON.stringify({
           type: 'join',
           role,
@@ -46,6 +48,12 @@ const MeetingRoom = ({ session, onLeave }) => {
             } else if (data.event === 'user_left') {
               setPeerPresence(`${data.role === 'tutor' ? 'Tutor' : 'Student'} left`);
             }
+          } else if (data.type === 'live_transcript') {
+            setTranscripts(prev => [...prev.slice(-30), {
+              role: data.role,
+              text: data.text,
+              timestamp: data.timestamp
+            }]);
           }
         } catch (e) {}
       };
@@ -53,7 +61,6 @@ const MeetingRoom = ({ session, onLeave }) => {
       ws.onclose = () => {
         if (!isMounted) return;
         setConnectionStatus('disconnected');
-        // Resilient auto-reconnect attempt after 2 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           if (isMounted) connectWs();
         }, 2000);
@@ -68,7 +75,6 @@ const MeetingRoom = ({ session, onLeave }) => {
 
     connectWs();
 
-    // Heartbeat ping to keep connection healthy
     const pingInterval = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'ping' }));
@@ -82,6 +88,10 @@ const MeetingRoom = ({ session, onLeave }) => {
       if (wsRef.current) wsRef.current.close();
     };
   }, [roomCode, role, clientId]);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [transcripts]);
 
   const handleStroke = (stroke) => {
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -139,7 +149,6 @@ const MeetingRoom = ({ session, onLeave }) => {
             </div>
           </div>
 
-          {/* Connection status tag */}
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -161,8 +170,25 @@ const MeetingRoom = ({ session, onLeave }) => {
           </div>
         </div>
 
-        {/* User Info & Leave Room */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            onClick={() => setShowDiagnostics(true)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 12px',
+              borderRadius: '6px',
+              backgroundColor: '#1e3a8a',
+              color: '#93c5fd',
+              fontSize: '12px',
+              fontWeight: 600,
+              border: '1px solid #2563eb'
+            }}>
+            <Activity size={14} />
+            Inspect Server Data
+          </button>
+
           <span style={{
             backgroundColor: role === 'tutor' ? '#1e3a8a' : '#14532d',
             color: role === 'tutor' ? '#93c5fd' : '#86efac',
@@ -194,9 +220,9 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
       </header>
 
-      {/* Main Split Body: Whiteboard Workspace + Video Feed Column */}
+      {/* Main Split Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Whiteboard Workspace (Center stage) */}
+        {/* Whiteboard Workspace */}
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
           <Whiteboard
             ref={whiteboardRef}
@@ -205,8 +231,8 @@ const MeetingRoom = ({ session, onLeave }) => {
           />
         </div>
 
-        {/* Video Call Sidebar */}
-        <div style={{ width: '320px', height: '100%' }}>
+        {/* Right Sidebar: Video Call */}
+        <div style={{ width: '320px', height: '100%', display: 'flex', flexDirection: 'column' }}>
           <VideoCall
             socket={socket}
             roomCode={roomCode}
@@ -217,14 +243,20 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
       </div>
 
-      {/* Background Stream Ingestion Dispatcher */}
-      {/* Periodically streams cleanly-tagged snapshots & audio chunks to Django */}
+      {/* Stream Dispatcher with configurable sample rates */}
       <StreamDispatcher
         socket={socket}
         role={role}
         clientId={clientId}
         whiteboardRef={whiteboardRef}
         localStream={localStream}
+      />
+
+      {/* Live Server In-Memory Diagnostics Modal */}
+      <DiagnosticsModal
+        roomCode={roomCode}
+        isOpen={showDiagnostics}
+        onClose={() => setShowDiagnostics(false)}
       />
     </div>
   );

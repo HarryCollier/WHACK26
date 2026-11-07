@@ -1,14 +1,13 @@
 import React, { useEffect, useRef } from 'react';
+import { STREAM_CONFIG } from '../config/streamConfig';
 
 /**
- * StreamDispatcher runs seamlessly in the background.
- * It periodically captures:
- * 1. Whiteboard canvas snapshots (base64 image)
- * 2. Video camera frames (base64 image)
- * 3. Audio slices (MediaRecorder webm/ogg audio chunks)
+ * StreamDispatcher handles timestamped streams at configurable sample rates:
+ * - Video snapshots: every 0.5s (STREAM_CONFIG.VIDEO_SNAPSHOT_INTERVAL_MS)
+ * - Whiteboard snapshots: every X sec (STREAM_CONFIG.WHITEBOARD_SNAPSHOT_INTERVAL_MS)
+ * - Audio chunks: every 3s (STREAM_CONFIG.AUDIO_CHUNK_INTERVAL_MS)
  * 
- * Every payload is cleanly tagged with { role, clientId, timestamp, type }
- * so your backend knows exactly who spoke or drew what, without complex diarization.
+ * All items are labelled by role and timestamped.
  */
 const StreamDispatcher = ({ 
   socket, 
@@ -16,86 +15,137 @@ const StreamDispatcher = ({
   clientId, 
   whiteboardRef, 
   localStream,
-  snapshotIntervalMs = 5000, // 5s snapshot interval to avoid overwhelming connection
-  audioChunkIntervalMs = 4000 // 4s audio slice interval
+  config = STREAM_CONFIG
 }) => {
-  const mediaRecorderRef = useRef(null);
+  const audioRecorderRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const hiddenVideoRef = useRef(null);
 
-  // Initialize Audio Slicing via MediaRecorder
+  // 1. Audio MediaRecorder: Slices audio into timestamped chunks for live transcription
   useEffect(() => {
     if (!localStream || !socket) return;
 
     try {
-      // Create an audio-only stream from the user's mic
       const audioTracks = localStream.getAudioTracks();
       if (audioTracks.length === 0) return;
 
       const audioOnlyStream = new MediaStream(audioTracks);
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm') 
-        ? 'audio/webm' 
-        : 'audio/ogg';
+      // MediaRecorder options with fallbacks
+      let mimeType = 'audio/webm';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mimeType = 'audio/webm;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        mimeType = 'audio/ogg;codecs=opus';
+      }
 
-      const recorder = new MediaRecorder(audioOnlyStream, { mimeType });
-      mediaRecorderRef.current = recorder;
+      let audioChunks = [];
+      const audioRecorder = new MediaRecorder(audioOnlyStream, { mimeType });
+      audioRecorderRef.current = audioRecorder;
 
-      recorder.ondataavailable = async (e) => {
-        if (e.data && e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64Audio = reader.result;
-            socket.send(JSON.stringify({
-              type: 'audio_chunk',
-              role,
-              clientId,
-              timestamp: Date.now(),
-              format: mimeType,
-              data: base64Audio
-            }));
-          };
-          reader.readAsDataURL(e.data);
+      audioRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunks.push(e.data);
         }
       };
 
-      recorder.start(audioChunkIntervalMs);
+      // Interval to cycle recorder so full headers are produced for each chunk
+      const sliceInterval = setInterval(() => {
+        if (audioRecorder.state === 'recording') {
+          audioRecorder.stop();
+        }
+      }, config.AUDIO_CHUNK_INTERVAL_MS);
+
+      audioRecorder.onstop = () => {
+        // Only send if someone was speaking or audio has sufficient volume
+        if (audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
+          const blob = new Blob(audioChunks, { type: mimeType });
+          audioChunks = [];
+
+          // Don't waste CPU or trigger Whisper hallucinations on tiny empty buffers
+          if (blob.size > 2000) {
+            const chunkTimestamp = Date.now();
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              socket.send(JSON.stringify({
+                type: 'audio_chunk',
+                role,
+                clientId,
+                timestamp: chunkTimestamp,
+                format: mimeType,
+                data: reader.result
+              }));
+            };
+            reader.readAsDataURL(blob);
+          }
+        }
+
+        // Restart recording next slice if stream is still active
+        if (localStream.active && audioRecorder.state === 'inactive') {
+          try {
+            audioRecorder.start();
+          } catch (e) {}
+        }
+      };
+
+      audioRecorder.start();
+
+      return () => {
+        clearInterval(sliceInterval);
+        if (audioRecorder.state !== 'inactive') {
+          try { audioRecorder.stop(); } catch (e) {}
+        }
+      };
     } catch (err) {
       console.warn('Audio chunk recording failed:', err);
     }
+  }, [localStream, socket, role, clientId, config.AUDIO_CHUNK_INTERVAL_MS]);
 
-    return () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        try { mediaRecorderRef.current.stop(); } catch (e) {}
-      }
-    };
-  }, [localStream, socket, role, clientId, audioChunkIntervalMs]);
-
-  // Periodic Snapshot Dispatches (Whiteboard & Video Frame)
+  // 2. High-frequency Video Snapshots: Captured every 0.5s (500ms)
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !localStream) return;
 
-    // Create offscreen video element to sample local camera frames
     const hiddenVideo = document.createElement('video');
     hiddenVideo.muted = true;
     hiddenVideo.playsInline = true;
     hiddenVideo.autoplay = true;
     hiddenVideoRef.current = hiddenVideo;
-
-    if (localStream) {
-      hiddenVideo.srcObject = localStream;
-      hiddenVideo.play().catch(() => {});
-    }
+    hiddenVideo.srcObject = localStream;
+    hiddenVideo.play().catch(() => {});
 
     const hiddenCanvas = document.createElement('canvas');
-    hiddenCanvas.width = 320;
-    hiddenCanvas.height = 240;
+    hiddenCanvas.width = config.VIDEO_WIDTH;
+    hiddenCanvas.height = config.VIDEO_HEIGHT;
     hiddenCanvasRef.current = hiddenCanvas;
 
-    const intervalId = setInterval(() => {
+    const videoInterval = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      const now = Date.now();
+      if (hiddenVideo && hiddenVideo.readyState >= 2) {
+        const ctx = hiddenCanvas.getContext('2d');
+        ctx.drawImage(hiddenVideo, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        const videoDataUrl = hiddenCanvas.toDataURL('image/jpeg', config.VIDEO_QUALITY);
 
-      // 1. Whiteboard snapshot
+        socket.send(JSON.stringify({
+          type: 'video_frame',
+          role,
+          clientId,
+          timestamp: Date.now(),
+          dataUrl: videoDataUrl
+        }));
+      }
+    }, config.VIDEO_SNAPSHOT_INTERVAL_MS);
+
+    return () => {
+      clearInterval(videoInterval);
+      if (hiddenVideo) hiddenVideo.srcObject = null;
+    };
+  }, [socket, localStream, role, clientId, config.VIDEO_SNAPSHOT_INTERVAL_MS, config.VIDEO_WIDTH, config.VIDEO_HEIGHT, config.VIDEO_QUALITY]);
+
+  // 3. Whiteboard Snapshots: Captured every X seconds
+  useEffect(() => {
+    if (!socket) return;
+
+    const wbInterval = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
       if (whiteboardRef?.current?.getSnapshot) {
         const wbDataUrl = whiteboardRef.current.getSnapshot();
         if (wbDataUrl) {
@@ -103,34 +153,17 @@ const StreamDispatcher = ({
             type: 'whiteboard_snapshot',
             role,
             clientId,
-            timestamp: now,
+            timestamp: Date.now(),
             dataUrl: wbDataUrl
           }));
         }
       }
-
-      // 2. Video frame snapshot
-      if (hiddenVideo && hiddenVideo.readyState >= 2) {
-        const ctx = hiddenCanvas.getContext('2d');
-        ctx.drawImage(hiddenVideo, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-        const videoDataUrl = hiddenCanvas.toDataURL('image/jpeg', 0.6);
-        socket.send(JSON.stringify({
-          type: 'video_frame',
-          role,
-          clientId,
-          timestamp: now,
-          dataUrl: videoDataUrl
-        }));
-      }
-    }, snapshotIntervalMs);
+    }, config.WHITEBOARD_SNAPSHOT_INTERVAL_MS);
 
     return () => {
-      clearInterval(intervalId);
-      if (hiddenVideo) {
-        hiddenVideo.srcObject = null;
-      }
+      clearInterval(wbInterval);
     };
-  }, [socket, whiteboardRef, localStream, role, clientId, snapshotIntervalMs]);
+  }, [socket, whiteboardRef, role, clientId, config.WHITEBOARD_SNAPSHOT_INTERVAL_MS]);
 
   return null;
 };

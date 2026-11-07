@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Mic, MicOff, Video, VideoOff, Wifi, WifiOff } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, WifiOff } from 'lucide-react';
 
 const VideoCall = ({ 
   socket, 
@@ -21,8 +21,10 @@ const VideoCall = ({
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [peerConnected, setPeerConnected] = useState(false);
   const [audioMeter, setAudioMeter] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [peerSpeaking, setPeerSpeaking] = useState(false);
+  const [micDeviceName, setMicDeviceName] = useState('Default Microphone');
 
-  // STUN servers configuration for resilient NAT traversal
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -54,7 +56,18 @@ const VideoCall = ({
           localVideoRef.current.srcObject = stream;
         }
 
-        // Setup Lightweight browser Web Audio Analyser for tone/volume meter & speech activity
+        // Detect and display active microphone hardware/device label
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0 && audioTracks[0].label) {
+          setMicDeviceName(audioTracks[0].label);
+        } else if (navigator.mediaDevices.enumerateDevices) {
+          navigator.mediaDevices.enumerateDevices().then(devices => {
+            const audioInput = devices.find(d => d.kind === 'audioinput' && d.label);
+            if (audioInput) setMicDeviceName(audioInput.label);
+          }).catch(() => {});
+        }
+
+        // Web Audio API speech activity analysis
         try {
           const AudioCtx = window.AudioContext || window.webkitAudioContext;
           if (AudioCtx) {
@@ -62,9 +75,12 @@ const VideoCall = ({
             const source = audioContext.current.createMediaStreamSource(stream);
             analyser.current = audioContext.current.createAnalyser();
             analyser.current.fftSize = 256;
+            analyser.current.smoothingTimeConstant = 0.4;
             source.connect(analyser.current);
 
             const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
+            let lastSpeechBroadcast = 0;
+
             const checkVolume = () => {
               if (analyser.current) {
                 analyser.current.getByteFrequencyData(dataArray);
@@ -75,6 +91,22 @@ const VideoCall = ({
                 const avg = sum / dataArray.length;
                 const normalized = Math.min(100, Math.round((avg / 128) * 100));
                 setAudioMeter(normalized);
+                
+                const speakingNow = normalized > 12;
+                setIsSpeaking(speakingNow);
+
+                // Broadcast speaking activity state to peer
+                const now = Date.now();
+                if (socket && socket.readyState === WebSocket.OPEN && now - lastSpeechBroadcast > 300) {
+                  socket.send(JSON.stringify({
+                    type: 'speech_activity',
+                    isSpeaking: speakingNow,
+                    role,
+                    clientId
+                  }));
+                  lastSpeechBroadcast = now;
+                }
+
                 if (onAudioLevel) onAudioLevel(normalized);
               }
               animationFrameId.current = requestAnimationFrame(checkVolume);
@@ -114,14 +146,12 @@ const VideoCall = ({
     const pc = new RTCPeerConnection(rtcConfig);
     peerConnection.current = pc;
 
-    // Attach local stream tracks
     if (localStream.current) {
       localStream.current.getTracks().forEach(track => {
         pc.addTrack(track, localStream.current);
       });
     }
 
-    // Handle remote tracks
     pc.ontrack = (event) => {
       if (remoteVideoRef.current && event.streams[0]) {
         remoteVideoRef.current.srcObject = event.streams[0];
@@ -129,7 +159,6 @@ const VideoCall = ({
       }
     };
 
-    // Resilient ICE Candidate handling
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
@@ -150,7 +179,6 @@ const VideoCall = ({
     };
   };
 
-  // Listen for WebRTC signaling from the other peer
   useEffect(() => {
     if (!socket) return;
 
@@ -158,7 +186,11 @@ const VideoCall = ({
       try {
         const data = JSON.parse(event.data);
 
-        // When a remote peer joins, Tutor initiates offer
+        // Receive remote peer's speaking state
+        if (data.type === 'speech_activity' && data.clientId !== clientId) {
+          setPeerSpeaking(!!data.isSpeaking);
+        }
+
         if (data.type === 'presence' && data.event === 'user_joined' && role === 'tutor') {
           initiateOffer();
         }
@@ -256,7 +288,9 @@ const VideoCall = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        border: '1px solid #334155'
+        border: peerSpeaking ? '2px solid #22c55e' : '1px solid #334155',
+        boxShadow: peerSpeaking ? '0 0 16px rgba(34, 197, 94, 0.45)' : 'none',
+        transition: 'all 0.15s ease-out'
       }}>
         <video
           ref={remoteVideoRef}
@@ -284,15 +318,27 @@ const VideoCall = ({
           position: 'absolute',
           bottom: '8px',
           left: '8px',
-          background: 'rgba(15, 23, 42, 0.75)',
-          padding: '4px 8px',
-          borderRadius: '4px',
+          background: peerSpeaking ? 'rgba(5, 46, 22, 0.85)' : 'rgba(15, 23, 42, 0.75)',
+          border: peerSpeaking ? '1px solid #22c55e' : '1px solid transparent',
+          padding: '4px 10px',
+          borderRadius: '20px',
           fontSize: '11px',
           fontWeight: 600,
-          color: '#f8fafc',
-          textTransform: 'capitalize'
+          color: peerSpeaking ? '#4ade80' : '#f8fafc',
+          textTransform: 'capitalize',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          transition: 'all 0.2s ease-in-out'
         }}>
-          {role === 'tutor' ? 'Student' : 'Tutor'} {peerConnected ? '(Connected)' : ''}
+          <span>{role === 'tutor' ? 'Student' : 'Tutor'} {peerConnected ? '' : '(Offline)'}</span>
+          {peerSpeaking && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', height: '12px' }}>
+              <span style={{ width: '3px', height: '10px', borderRadius: '2px', backgroundColor: '#22c55e' }} />
+              <span style={{ width: '3px', height: '14px', borderRadius: '2px', backgroundColor: '#22c55e' }} />
+              <span style={{ width: '3px', height: '8px', borderRadius: '2px', backgroundColor: '#22c55e' }} />
+            </div>
+          )}
         </div>
       </div>
 
@@ -303,7 +349,9 @@ const VideoCall = ({
         borderRadius: '8px',
         overflow: 'hidden',
         backgroundColor: '#0f172a',
-        border: '1px solid #334155'
+        border: isSpeaking ? '2px solid #22c55e' : '1px solid #334155',
+        boxShadow: isSpeaking ? '0 0 16px rgba(34, 197, 94, 0.45)' : 'none',
+        transition: 'all 0.15s ease-out'
       }}>
         <video
           ref={localVideoRef}
@@ -319,60 +367,111 @@ const VideoCall = ({
           left: '8px',
           display: 'flex',
           alignItems: 'center',
-          gap: '6px',
-          background: 'rgba(15, 23, 42, 0.75)',
-          padding: '4px 8px',
-          borderRadius: '4px',
+          gap: '8px',
+          background: isSpeaking ? 'rgba(5, 46, 22, 0.85)' : 'rgba(15, 23, 42, 0.8)',
+          border: isSpeaking ? '1px solid #22c55e' : '1px solid #334155',
+          padding: '4px 10px',
+          borderRadius: '20px',
           fontSize: '11px',
           fontWeight: 600,
-          color: '#38bdf8'
+          color: isSpeaking ? '#4ade80' : '#cbd5e1',
+          transition: 'all 0.2s ease-in-out'
         }}>
           <span>You ({role})</span>
-          {/* Audio volume visualizer */}
-          <div style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            backgroundColor: audioMeter > 10 ? '#22c55e' : '#64748b',
-            boxShadow: audioMeter > 10 ? '0 0 8px #22c55e' : 'none'
-          }} />
+
+          {isMicOn && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', height: '14px' }}>
+              <span style={{
+                width: '3px',
+                height: isSpeaking ? `${Math.max(6, Math.min(14, audioMeter * 0.25))}px` : '4px',
+                borderRadius: '2px',
+                backgroundColor: isSpeaking ? '#22c55e' : '#64748b',
+                transition: 'height 0.08s ease-out'
+              }} />
+              <span style={{
+                width: '3px',
+                height: isSpeaking ? `${Math.max(8, Math.min(16, audioMeter * 0.35))}px` : '4px',
+                borderRadius: '2px',
+                backgroundColor: isSpeaking ? '#22c55e' : '#64748b',
+                transition: 'height 0.08s ease-out'
+              }} />
+              <span style={{
+                width: '3px',
+                height: isSpeaking ? `${Math.max(5, Math.min(12, audioMeter * 0.2))}px` : '4px',
+                borderRadius: '2px',
+                backgroundColor: isSpeaking ? '#22c55e' : '#64748b',
+                transition: 'height 0.08s ease-out'
+              }} />
+            </div>
+          )}
+
+          {!isMicOn && (
+            <MicOff size={12} color="#f87171" />
+          )}
         </div>
       </div>
 
-      {/* Control Buttons */}
+      {/* Control Buttons & Device Indicator */}
       <div style={{
         display: 'flex',
-        justifyContent: 'center',
-        gap: '12px',
-        padding: '8px 0'
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '4px 0'
       }}>
-        <button
-          onClick={toggleMic}
-          style={{
-            padding: '10px',
-            borderRadius: '50%',
-            backgroundColor: isMicOn ? '#334155' : '#ef4444',
-            color: '#f8fafc',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          }}>
-          {isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
-        </button>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'center',
+          gap: '12px'
+        }}>
+          <button
+            onClick={toggleMic}
+            style={{
+              padding: '10px',
+              borderRadius: '50%',
+              backgroundColor: isMicOn ? '#334155' : '#ef4444',
+              color: '#f8fafc',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+            {isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
+          </button>
 
-        <button
-          onClick={toggleVideo}
-          style={{
-            padding: '10px',
-            borderRadius: '50%',
-            backgroundColor: isVideoOn ? '#334155' : '#ef4444',
-            color: '#f8fafc',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          }}>
-          {isVideoOn ? <Video size={20} /> : <VideoOff size={20} />}
-        </button>
+          <button
+            onClick={toggleVideo}
+            style={{
+              padding: '10px',
+              borderRadius: '50%',
+              backgroundColor: isVideoOn ? '#334155' : '#ef4444',
+              color: '#f8fafc',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+            {isVideoOn ? <Video size={20} /> : <VideoOff size={20} />}
+          </button>
+        </div>
+
+        {/* Active Microphone Device Name */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px',
+          fontSize: '11px',
+          color: '#94a3b8',
+          maxWidth: '280px',
+          textAlign: 'center',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          marginTop: '2px'
+        }} title={`Connected mic: ${micDeviceName}`}>
+          <Mic size={12} color="#38bdf8" style={{ flexShrink: 0 }} />
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {micDeviceName}
+          </span>
+        </div>
       </div>
     </div>
   );
