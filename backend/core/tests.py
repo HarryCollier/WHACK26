@@ -151,3 +151,47 @@ class SessionStoreUnitTest(TestCase):
         self.assertIsNone(store.most_recent_whiteboard)
         self.assertEqual(len(store.all_whiteboards_history), 0)
         self.assertEqual(len(store.video_frames), 0)
+
+
+class TelemetryAndExtractorsTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.manager = SessionManager.get_instance()
+
+    def test_telemetry_endpoint_404_when_no_session(self):
+        response = self.client.get(reverse('session-telemetry', kwargs={'room_code': 'NONEXISTENT'}))
+        self.assertEqual(response.status_code, 404)
+
+    def test_telemetry_payload_generation(self):
+        from core.telemetry import build_telemetry_payload
+        store = self.manager.get_or_create("TELEM_TEST")
+        store.transcripts.append(TranscriptEntry(
+            role="tutor",
+            client_id="t1",
+            timestamp=1000,
+            text="Hello welcome to the lesson"
+        ))
+        store.transcripts.append(TranscriptEntry(
+            role="student",
+            client_id="s1",
+            timestamp=3000,
+            text="Thanks I need help with calculus"
+        ))
+
+        payload = build_telemetry_payload(store)
+        self.assertEqual(payload["room_code"], "TELEM_TEST")
+        self.assertEqual(len(payload["dialogue_timeline"]), 2)
+        self.assertIn("llm_prompt_context", payload)
+        self.assertIn("video_telemetry", payload)
+        self.assertIn("whiteboard_telemetry", payload)
+
+        # Query via HTTP endpoint
+        response = self.client.get(reverse('session-telemetry', kwargs={'room_code': 'TELEM_TEST'}))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["dialogue_timeline"]), 2)
+        self.assertEqual(data["dialogue_timeline"][0]["speech"], "Hello welcome to the lesson")
+
+        # Clean up
+        store.wipe_session()
+        del self.manager.rooms["TELEM_TEST"]
