@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import MeetingRoom
 from .session_store import SessionManager
+from .telemetry import build_telemetry_payload
 
 class CreateRoomView(APIView):
     def post(self, request):
@@ -100,3 +101,31 @@ class SessionStatsView(APIView):
                 for t in store.transcripts
             ]
         }, status=status.HTTP_200_OK)
+
+
+class TelemetryView(APIView):
+    """
+    Returns the full LLM-ready telemetry payload for a live session.
+    Includes: dialogue timeline, acoustic features, video engagement, whiteboard deltas.
+
+    URL: /api/rooms/<room_code>/telemetry/
+    """
+    def get(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            return Response({
+                'active': False,
+                'room_code': room_code,
+                'message': 'No active in-memory session for this room code.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        store = manager.rooms[room_code]
+        try:
+            payload = build_telemetry_payload(store)
+            return Response(payload, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({
+                'error': str(e),
+                'room_code': room_code
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
