@@ -120,8 +120,8 @@ class RoomSessionStore:
     is_running: bool = True
     worker_thread: Optional[threading.Thread] = None
 
-    # How many video frames to skip between feature extractions (reduces CPU load)
-    VIDEO_ANALYSIS_STRIDE: int = 10
+    # Video analysis stride: process every 3rd frame (instead of 10th) so metrics update smoothly
+    VIDEO_ANALYSIS_STRIDE: int = 3
 
     def start_transcription_worker(self, on_transcript_callback=None):
         def worker():
@@ -265,9 +265,9 @@ class RoomSessionStore:
             data_url=data_url
         ))
 
-        # Run video feature extraction on every Nth frame (stride) to avoid CPU overload
+        # Run video feature extraction on first frame, and every Nth frame (stride) after
         self._video_frame_counter[role] = self._video_frame_counter.get(role, 0) + 1
-        if self._video_frame_counter[role] % self.VIDEO_ANALYSIS_STRIDE == 0:
+        if self._video_frame_counter[role] == 1 or self._video_frame_counter[role] % self.VIDEO_ANALYSIS_STRIDE == 0:
             try:
                 from .extractors.video_features import extract_video_features
                 features = extract_video_features(data_url)

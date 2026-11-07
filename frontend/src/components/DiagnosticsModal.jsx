@@ -207,49 +207,73 @@ function VideoSection({ video }) {
         const vt = video[role];
         if (!vt) return null;
         const engAvg = vt.engagement_avg;
-        const engColor = engAvg == null ? '#64748b' : engAvg >= 0.65 ? '#22c55e' : engAvg >= 0.35 ? '#facc15' : '#ef4444';
+        const engColor = engAvg == null ? '#64748b' : engAvg >= 0.65 ? '#22c55e' : engAvg >= 0.40 ? '#facc15' : '#ef4444';
         return (
           <SectionCard key={role}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-              <span style={{ fontSize: '12px', fontWeight: 700, color: ROLE_COLOUR[role] }}>{role.toUpperCase()}</span>
+            {/* Header with Role, Attention state, and Engagement Bar */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 700, color: ROLE_COLOUR[role] }}>{role.toUpperCase()}</span>
+                {vt.current_attention && (
+                  <Badge label={vt.current_attention.toUpperCase()} color={vt.current_attention === 'focused' || vt.current_attention === 'engaged_happy' ? '#22c55e' : vt.current_attention === 'reading_board' ? '#38bdf8' : vt.current_attention === 'confused' ? '#f59e0b' : '#ef4444'} />
+                )}
+              </div>
               {engAvg != null && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ fontSize: '10px', color: '#94a3b8' }}>Engagement:</span>
                   <div style={{ width: '80px', height: '6px', borderRadius: '3px', backgroundColor: '#1e293b', overflow: 'hidden' }}>
-                    <div style={{ width: `${engAvg * 100}%`, height: '100%', backgroundColor: engColor, borderRadius: '3px' }} />
+                    <div style={{ width: `${Math.min(100, Math.max(5, engAvg * 100))}%`, height: '100%', backgroundColor: engColor, borderRadius: '3px' }} />
                   </div>
-                  <span style={{ fontSize: '11px', color: engColor }}>{(engAvg * 100).toFixed(0)}%</span>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: engColor }}>{(engAvg * 100).toFixed(0)}%</span>
                 </div>
               )}
             </div>
-            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '8px' }}>
-              <Metric label="Frames captured" value={vt.frames_captured} />
-              <Metric label="Frames analysed" value={vt.frames_analysed} />
-              {vt.head_yaw_avg != null && <Metric label="Avg head yaw" value={`${vt.head_yaw_avg.toFixed(1)}°`} />}
-              {vt.head_pitch_avg != null && <Metric label="Avg head pitch" value={`${vt.head_pitch_avg.toFixed(1)}°`} />}
-              {vt.brow_furrow_avg != null && <Metric label="Brow furrow" value={vt.brow_furrow_avg.toFixed(2)} />}
+
+            {/* Comprehensive Metrics Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginBottom: '8px', backgroundColor: '#020617', padding: '8px', borderRadius: '6px' }}>
+              <Metric label="Frames (analyzed/total)" value={`${vt.frames_analysed} / ${vt.frames_captured}`} />
+              {vt.head_yaw_avg != null && <Metric label="Head Yaw (L/R)" value={`${vt.head_yaw_avg.toFixed(1)}°`} />}
+              {vt.head_pitch_avg != null && <Metric label="Head Pitch (U/D)" value={`${vt.head_pitch_avg.toFixed(1)}°`} />}
+              {vt.brow_furrow_avg != null && <Metric label="Brow Furrow (confusion)" value={`${(vt.brow_furrow_avg * 100).toFixed(0)}%`} />}
+              {vt.smile_avg != null && <Metric label="Smile / Affect" value={`${(vt.smile_avg * 100).toFixed(0)}%`} />}
+              {vt.eye_openness_avg != null && <Metric label="Eye Openness" value={`${(vt.eye_openness_avg * 100).toFixed(0)}%`} />}
             </div>
-            {/* Gaze summary */}
-            {vt.gaze_summary && Object.keys(vt.gaze_summary).length > 0 && (
-              <div style={{ marginBottom: '8px' }}>
-                <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '4px' }}>Gaze distribution</div>
-                <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                  {Object.entries(vt.gaze_summary).sort((a, b) => b[1] - a[1]).map(([g, count]) => (
-                    <Badge key={g} label={`${g}: ${count}`} color={g === 'forward' ? '#22c55e' : '#f97316'} />
-                  ))}
+
+            {/* Gaze & Attention Distributions */}
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '8px' }}>
+              {vt.gaze_summary && Object.keys(vt.gaze_summary).length > 0 && (
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>Gaze Distribution</div>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {Object.entries(vt.gaze_summary).sort((a, b) => b[1] - a[1]).map(([g, count]) => (
+                      <Badge key={g} label={`${g}: ${count}`} color={g === 'forward' ? '#22c55e' : g === 'down' ? '#38bdf8' : '#f97316'} />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-            {/* Trend */}
+              )}
+              {vt.attention_summary && Object.keys(vt.attention_summary).length > 0 && (
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>Attention States</div>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {Object.entries(vt.attention_summary).sort((a, b) => b[1] - a[1]).map(([att, count]) => (
+                      <Badge key={att} label={`${att}: ${count}`} color="#a855f7" />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Trend Timeline */}
             {vt.engagement_trend && vt.engagement_trend.length > 0 && (
               <div>
-                <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '4px' }}>Engagement trend (sample)</div>
-                <div style={{ display: 'flex', gap: '3px', alignItems: 'flex-end', height: '36px' }}>
+                <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '4px' }}>Timeline Flow (Sampled)</div>
+                <div style={{ display: 'flex', gap: '3px', alignItems: 'flex-end', height: '28px', backgroundColor: '#020617', padding: '2px', borderRadius: '4px' }}>
                   {vt.engagement_trend.map((pt, i) => {
                     const score = pt.engagement_score ?? 0;
-                    const col = score >= 0.65 ? '#22c55e' : score >= 0.35 ? '#facc15' : '#ef4444';
+                    const col = score >= 0.65 ? '#22c55e' : score >= 0.40 ? '#facc15' : '#ef4444';
                     return (
-                      <div key={i} title={`t=${pt.timestamp_ms} | ${pt.engagement_label} | gaze=${pt.gaze}`}
-                        style={{ flex: 1, minWidth: '4px', borderRadius: '2px', backgroundColor: col, height: `${Math.max(4, score * 36)}px` }} />
+                      <div key={i} title={`t=${pt.timestamp_ms}ms | ${pt.attention_state || pt.engagement_label} | score=${(score * 100).toFixed(0)}% | gaze=${pt.gaze}`}
+                        style={{ flex: 1, minWidth: '4px', borderRadius: '2px', backgroundColor: col, height: `${Math.max(4, score * 24)}px` }} />
                     );
                   })}
                 </div>

@@ -195,3 +195,279 @@ class TelemetryAndExtractorsTest(TestCase):
         # Clean up
         store.wipe_session()
         del self.manager.rooms["TELEM_TEST"]
+
+
+class MultimodalExtractorsUnitTest(TestCase):
+    """
+    Comprehensive tests using synthetic audio waves, whiteboard strokes,
+    and video frames to verify end-to-end extraction and telemetry pipeline.
+    """
+    def test_whiteboard_delta_extraction(self):
+        import cv2, numpy as np, base64
+        from core.extractors.whiteboard_features import extract_whiteboard_delta
+
+        # Create 1st snapshot (blank canvas)
+        canvas1 = np.full((240, 320, 3), 255, dtype=np.uint8)
+        _, buf1 = cv2.imencode('.png', canvas1)
+        b64_1 = 'data:image/png;base64,' + base64.b64encode(buf1).decode('utf-8')
+
+        # Create 2nd snapshot with some tutor math writing
+        canvas2 = canvas1.copy()
+        cv2.line(canvas2, (40, 60), (280, 60), (0, 0, 0), 4)
+        cv2.putText(canvas2, 'E = mc^2', (50, 140), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        _, buf2 = cv2.imencode('.png', canvas2)
+        b64_2 = 'data:image/png;base64,' + base64.b64encode(buf2).decode('utf-8')
+
+        delta = extract_whiteboard_delta(b64_1, b64_2)
+        self.assertGreater(delta['change_percent'], 0.1)
+        self.assertIn(delta['change_level'], ['minor', 'moderate', 'major'])
+        self.assertGreater(delta['pixel_diff_count'], 0)
+        self.assertIsNone(delta['error'])
+
+    def test_audio_feature_extraction(self):
+        import numpy as np, io, base64, soundfile as sf
+        from core.extractors.audio_features import extract_audio_features
+
+        # Generate 1.0 second of 220Hz synthetic tone (typical human voice fundamental)
+        sr = 16000
+        duration = 1.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        audio = 0.5 * np.sin(2 * np.pi * 220 * t)
+
+        buf = io.BytesIO()
+        sf.write(buf, audio, sr, format='WAV')
+        b64_audio = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+        features = extract_audio_features(b64_audio)
+        self.assertNotIn('error', features)
+        self.assertGreater(features['rms_mean'], 0.0)
+        self.assertAlmostEqual(features['pitch_mean_hz'], 220.0, delta=15.0)
+        self.assertIn(features['confidence_signal'], ['low', 'medium', 'high'])
+
+    def test_video_feature_extraction_on_frame(self):
+        import cv2, numpy as np, base64
+        from core.extractors.video_features import extract_video_features
+
+        # 1. Blank frame test (no face detected)
+        frame_blank = np.zeros((240, 320, 3), dtype=np.uint8)
+        _, buf_b = cv2.imencode('.jpg', frame_blank)
+        data_url_b = 'data:image/jpeg;base64,' + base64.b64encode(buf_b).decode('utf-8')
+
+        res_b = extract_video_features(data_url_b)
+        self.assertFalse(res_b['face_detected'])
+        self.assertEqual(res_b['attention_state'], 'no_face')
+
+        # 2. Real frontal face test (detects eyes, nose, gaze, engagement)
+        w, h = 480, 480
+        frame_face = np.full((h, w, 3), 200, dtype=np.uint8)
+        cv2.ellipse(frame_face, (240, 240), (120, 160), 0, 0, 360, (180, 190, 220), -1)
+        cv2.circle(frame_face, (190, 200), 20, (255, 255, 255), -1)
+        cv2.circle(frame_face, (190, 200), 8, (50, 50, 50), -1)
+        cv2.circle(frame_face, (290, 200), 20, (255, 255, 255), -1)
+        cv2.circle(frame_face, (290, 200), 8, (50, 50, 50), -1)
+        cv2.line(frame_face, (240, 220), (240, 260), (100, 100, 100), 3)
+        cv2.line(frame_face, (210, 300), (270, 300), (80, 80, 150), 4)
+
+        _, buf_f = cv2.imencode('.jpg', frame_face)
+        data_url_f = 'data:image/jpeg;base64,' + base64.b64encode(buf_f).decode('utf-8')
+
+        res_f = extract_video_features(data_url_f)
+        self.assertTrue(res_f['face_detected'])
+        self.assertEqual(res_f['gaze_direction'], 'forward')
+        self.assertTrue(res_f['eye_contact'])
+        self.assertEqual(res_f['attention_state'], 'focused')
+        self.assertGreaterEqual(res_f['engagement_score'], 0.70)
+        self.assertEqual(res_f['engagement_label'], 'engaged')
+
+    def test_full_session_multimodal_ingest_and_telemetry(self):
+        from core.session_store import SessionManager
+        from core.telemetry import build_telemetry_payload
+        import cv2, numpy as np, base64
+
+        manager = SessionManager.get_instance()
+        store = manager.get_or_create("FULL_TEST")
+
+        # 1. Simulate whiteboard drawings
+        canvas1 = np.full((240, 320, 3), 255, dtype=np.uint8)
+        _, buf1 = cv2.imencode('.png', canvas1)
+        store.update_whiteboard('data:image/png;base64,' + base64.b64encode(buf1).decode('utf-8'), 1000, 'tutor')
+
+        canvas2 = canvas1.copy()
+        cv2.circle(canvas2, (120, 120), 40, (0, 0, 0), -1)
+        _, buf2 = cv2.imencode('.png', canvas2)
+        store.update_whiteboard('data:image/png;base64,' + base64.b64encode(buf2).decode('utf-8'), 4000, 'tutor')
+
+        # 2. Simulate video frames
+        vf = np.zeros((120, 160, 3), dtype=np.uint8)
+        _, vbuf = cv2.imencode('.jpg', vf)
+        vdata = 'data:image/jpeg;base64,' + base64.b64encode(vbuf).decode('utf-8')
+        for i in range(6):
+            store.add_video_frame('tutor', 'client_1', 1000 + i * 500, vdata)
+
+        # 3. Verify telemetry payload contains everything
+        payload = build_telemetry_payload(store)
+        self.assertEqual(payload['room_code'], 'FULL_TEST')
+        self.assertGreaterEqual(payload['whiteboard_telemetry']['total_snapshots'], 2)
+        self.assertGreater(len(payload['whiteboard_telemetry']['delta_history']), 0)
+        self.assertEqual(payload['video_telemetry']['tutor']['frames_captured'], 6)
+        self.assertIn('llm_prompt_context', payload)
+
+        store.wipe_session()
+        del manager.rooms['FULL_TEST']
+
+    def test_real_video_feed_face_and_engagement_sequence(self):
+        """
+        Tests processing an actual continuous video stream of a human face
+        (sample_face_feed.mp4) through SessionStore and TelemetryAggregator.
+        Verifies that engagement is detected, gaze is forward, and metrics are computed.
+        """
+        import cv2, os, base64
+        from core.session_store import SessionManager
+        from core.telemetry import build_telemetry_payload
+
+        video_path = os.path.join(os.path.dirname(__file__), 'extractors', 'sample_face_feed.mp4')
+        if not os.path.exists(video_path):
+            self.skipTest("sample_face_feed.mp4 not present for real video feed test")
+
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+
+        manager = SessionManager.get_instance()
+        store = manager.get_or_create("REAL_FEED_TEST")
+
+        # Simulate 12 client video frames (approx 4 seconds of webcam stream)
+        for i in range(12):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(i * fps * 0.35))
+            ret, frame = cap.read()
+            if not ret:
+                break
+            _, buf = cv2.imencode('.jpg', frame)
+            data_url = 'data:image/jpeg;base64,' + base64.b64encode(buf).decode('utf-8')
+            store.add_video_frame('tutor', 'client_tutor', 1000 + i * 350, data_url)
+
+        cap.release()
+
+        # Build LLM telemetry payload
+        payload = build_telemetry_payload(store)
+        vt = payload['video_telemetry']['tutor']
+
+        # Assertions on real video feed telemetry
+        self.assertEqual(vt['frames_captured'], 12)
+        self.assertGreaterEqual(vt['frames_analysed'], 4)
+        self.assertIsNotNone(vt['engagement_avg'])
+        self.assertGreaterEqual(vt['engagement_avg'], 0.70, f"Expected >70% engagement on frontal face video feed, got {vt['engagement_avg']}")
+        self.assertEqual(vt['current_attention'], 'focused')
+        self.assertIn('forward', vt['gaze_summary'])
+        self.assertGreater(len(vt['engagement_trend']), 0)
+
+        # Check each trend sample has non-zero engagement
+        for pt in vt['engagement_trend']:
+            self.assertGreater(pt['engagement_score'], 0.60)
+            self.assertEqual(pt['engagement_label'], 'engaged')
+
+        # Clean up
+        store.wipe_session()
+        del manager.rooms["REAL_FEED_TEST"]
+
+    def test_real_photo_face_detection_and_blendshapes(self):
+        """
+        Tests extract_video_features on a real human portrait (test_face.jpg).
+        Verifies that landmarks, gaze, head pose, and blendshape scores are properly extracted.
+        """
+        import cv2, os, base64
+        from core.extractors.video_features import extract_video_features
+
+        img_path = os.path.join(os.path.dirname(__file__), 'extractors', 'test_face.jpg')
+        if not os.path.exists(img_path):
+            self.skipTest("test_face.jpg not present")
+
+        img = cv2.imread(img_path)
+        _, buf = cv2.imencode('.jpg', img)
+        data_url = 'data:image/jpeg;base64,' + base64.b64encode(buf).decode('utf-8')
+
+        res = extract_video_features(data_url)
+        self.assertTrue(res['face_detected'])
+        self.assertGreater(res['engagement_score'], 0.0)
+        self.assertIsNotNone(res['head_yaw_deg'])
+        self.assertIsNotNone(res['head_pitch_deg'])
+        self.assertGreaterEqual(res['eye_openness'], 0.5)
+        self.assertIn(res['attention_state'], ['focused', 'distracted', 'confused', 'reading_board', 'speaking', 'engaged_happy'])
+
+    def test_dual_independent_video_feeds_tutor_and_student(self):
+        """
+        Verifies that tutor and student have completely separated video streams:
+        - Tutor feed from their camera (client_id="tutor_device")
+        - Student feed from their camera (client_id="student_device")
+        - Analyzed independently by MediaPipe with num_faces=1 per stream
+        - Telemetry reports separate engagement, gaze, and attention metrics for each person.
+        """
+        import cv2, os, base64, numpy as np
+        from core.session_store import SessionManager
+        from core.telemetry import build_telemetry_payload
+
+        manager = SessionManager.get_instance()
+        store = manager.get_or_create("DUAL_FEED_TEST")
+
+        # 1. Tutor frame: Frontal face looking directly at camera
+        tutor_img = np.full((360, 480, 3), 200, dtype=np.uint8)
+        cv2.ellipse(tutor_img, (240, 180), (100, 140), 0, 0, 360, (180, 190, 220), -1)
+        cv2.circle(tutor_img, (200, 150), 16, (255, 255, 255), -1)
+        cv2.circle(tutor_img, (200, 150), 6, (50, 50, 50), -1)
+        cv2.circle(tutor_img, (280, 150), 16, (255, 255, 255), -1)
+        cv2.circle(tutor_img, (280, 150), 6, (50, 50, 50), -1)
+        cv2.line(tutor_img, (240, 170), (240, 210), (100, 100, 100), 3)
+        cv2.line(tutor_img, (210, 240), (270, 240), (80, 80, 150), 4)
+
+        _, buf_t = cv2.imencode('.jpg', tutor_img)
+        tutor_data_url = 'data:image/jpeg;base64,' + base64.b64encode(buf_t).decode('utf-8')
+
+        # 2. Student frame: Face looking down at notebook/whiteboard
+        student_img = np.full((360, 480, 3), 200, dtype=np.uint8)
+        cv2.ellipse(student_img, (240, 210), (100, 140), 0, 0, 360, (180, 190, 220), -1)
+        # Eyes positioned lower
+        cv2.circle(student_img, (200, 200), 16, (255, 255, 255), -1)
+        cv2.circle(student_img, (200, 208), 6, (50, 50, 50), -1)
+        cv2.circle(student_img, (280, 200), 16, (255, 255, 255), -1)
+        cv2.circle(student_img, (280, 208), 6, (50, 50, 50), -1)
+        cv2.line(student_img, (240, 220), (240, 250), (100, 100, 100), 3)
+        cv2.line(student_img, (220, 280), (260, 280), (80, 80, 150), 4)
+
+        _, buf_s = cv2.imencode('.jpg', student_img)
+        student_data_url = 'data:image/jpeg;base64,' + base64.b64encode(buf_s).decode('utf-8')
+
+        # Interleave incoming packets from tutor and student
+        for i in range(6):
+            ts = 1000 + i * 500
+            store.add_video_frame('tutor', 'tutor_laptop', ts, tutor_data_url)
+            store.add_video_frame('student', 'student_tablet', ts, student_data_url)
+
+        # Build combined session telemetry
+        payload = build_telemetry_payload(store)
+
+        # Verify tutor telemetry partition
+        vt_tutor = payload['video_telemetry']['tutor']
+        self.assertEqual(vt_tutor['frames_captured'], 6)
+        self.assertGreaterEqual(vt_tutor['frames_analysed'], 2)
+        self.assertIsNotNone(vt_tutor['engagement_avg'])
+        self.assertGreater(vt_tutor['engagement_avg'], 0.65)
+
+        # Verify student telemetry partition
+        vt_student = payload['video_telemetry']['student']
+        self.assertEqual(vt_student['frames_captured'], 6)
+        self.assertGreaterEqual(vt_student['frames_analysed'], 2)
+        self.assertIsNotNone(vt_student['engagement_avg'])
+
+        # Verify they are partitioned and do not overwrite each other
+        self.assertEqual(len(store.video_frames['tutor']), 6)
+        self.assertEqual(len(store.video_frames['student']), 6)
+        self.assertEqual(store.video_frames['tutor'][0].client_id, 'tutor_laptop')
+        self.assertEqual(store.video_frames['student'][0].client_id, 'student_tablet')
+
+        # Verify prompt block contains separate sections for both
+        prompt = payload['llm_prompt_context']
+        self.assertIn("TUTOR:", prompt)
+        self.assertIn("STUDENT:", prompt)
+
+        # Cleanup
+        store.wipe_session()
+        del manager.rooms["DUAL_FEED_TEST"]

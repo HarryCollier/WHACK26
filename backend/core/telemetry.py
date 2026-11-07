@@ -80,20 +80,31 @@ def build_telemetry_payload(store: "RoomSessionStore") -> dict:
             }
             continue
 
-        engagement_scores = [f["engagement_score"] for f in frames if f.get("engagement_score") is not None]
+        frames_with_face = [f for f in frames if f.get("face_detected")]
+        if frames_with_face:
+            engagement_scores = [f["engagement_score"] for f in frames_with_face if f.get("engagement_score") is not None]
+        else:
+            engagement_scores = [f["engagement_score"] for f in frames if f.get("engagement_score") is not None]
+
         gazes = [f["gaze_direction"] for f in frames if f.get("gaze_direction") and f["gaze_direction"] != "unknown"]
         yaws = [f["head_yaw_deg"] for f in frames if f.get("head_yaw_deg") is not None]
         pitches = [f["head_pitch_deg"] for f in frames if f.get("head_pitch_deg") is not None]
         furrows = [f["brow_furrow_score"] for f in frames if f.get("brow_furrow_score") is not None]
+        smiles = [f["smile_score"] for f in frames if f.get("smile_score") is not None]
+        eye_openness = [f["eye_openness"] for f in frames if f.get("eye_openness") is not None]
+        mouth_open = [f["mouth_open_score"] for f in frames if f.get("mouth_open_score") is not None]
 
-        # Thin trend: 1 data point per ~10 frames for the LLM context
-        stride = max(1, len(frames) // 20)
+        # Thin trend: 1 data point per ~5 frames for the LLM context
+        stride = max(1, len(frames) // 25)
         trend = [
             {
                 "timestamp_ms": frames[i].get("timestamp_ms"),
                 "engagement_score": frames[i].get("engagement_score"),
                 "gaze": frames[i].get("gaze_direction"),
                 "engagement_label": frames[i].get("engagement_label"),
+                "attention_state": frames[i].get("attention_state"),
+                "brow_furrow": frames[i].get("brow_furrow_score"),
+                "smile": frames[i].get("smile_score"),
             }
             for i in range(0, len(frames), stride)
         ]
@@ -103,15 +114,28 @@ def build_telemetry_payload(store: "RoomSessionStore") -> dict:
         for g in gazes:
             gaze_counts[g] = gaze_counts.get(g, 0) + 1
 
+        # Attention states distribution
+        attention_counts = {}
+        for f in frames:
+            att = f.get("attention_state", "unknown")
+            attention_counts[att] = attention_counts.get(att, 0) + 1
+
+        recent_state = frames[-1].get("attention_state") if frames else "unknown"
+
         video_telemetry[role] = {
             "frames_captured": len(store.video_frames.get(role, [])),
             "frames_analysed": len(frames),
             "engagement_avg": _safe_mean(engagement_scores),
+            "current_attention": recent_state,
             "engagement_trend": trend,
             "gaze_summary": gaze_counts,
+            "attention_summary": attention_counts,
             "head_yaw_avg": _safe_mean(yaws),
             "head_pitch_avg": _safe_mean(pitches),
             "brow_furrow_avg": _safe_mean(furrows),
+            "smile_avg": _safe_mean(smiles),
+            "eye_openness_avg": _safe_mean(eye_openness),
+            "mouth_open_avg": _safe_mean(mouth_open),
         }
 
     # ──────────────────────────────────────────────────────────────────────────

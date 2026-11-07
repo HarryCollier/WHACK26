@@ -30,17 +30,42 @@ A custom tutoring space featuring real-time collaborative whiteboard, WebRTC vid
 
 ---
 
-## Run with Docker (Recommended for Easy Transfer)
+## Running the Project: 2 Ways to Run (Local Fast vs Docker)
 
-Ensure Docker Desktop is installed and running, then execute from the project root:
+Both versions run the exact same code from the repository and stay in sync.
 
-```bash
-docker compose up --build
+### Mode A: Local Fast Mode (⚡ Instant Start in < 2 seconds)
+Everything is already installed in your local `venv` and `node_modules`. No waiting for Docker containers or rebuilding!
+
+**Option 1: One-Click Script**
+Double-click [`start-local.bat`](file:///c:/Users/snowb/PROG/whack26/WHACK26/start-local.bat) in the project root.
+
+**Option 2: Terminal Commands**
+```powershell
+# Terminal 1 (Backend - Daphne ASGI):
+cd backend
+..\venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 server.asgi:application
+
+# Terminal 2 (Frontend - Vite hot-reloading):
+cd frontend
+npm run dev
 ```
 
-- **Frontend:** `http://localhost:5173`
-- **Backend API & WebSockets:** `http://localhost:8000`
+* **Frontend:** `http://localhost:5173`
+* **Backend API & WebSockets:** `http://localhost:8000`
 
+---
+
+### Mode B: Docker Mode (🐳 Containerized for Easy Cloud Deployment / Production)
+Use this when deploying or testing container parity.
+
+**Option 1: One-Click Script**
+Double-click [`start-docker.bat`](file:///c:/Users/snowb/PROG/whack26/WHACK26/start-docker.bat).
+
+**Option 2: Terminal Command**
+```bash
+docker compose up -d
+```
 To stop:
 ```bash
 docker compose down

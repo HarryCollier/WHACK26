@@ -79,8 +79,9 @@ describe('Whiteboard Component', () => {
     expect(screen.getByTitle('Pen')).toBeInTheDocument();
     expect(screen.getByTitle('Highlighter')).toBeInTheDocument();
     expect(screen.getByTitle('Eraser')).toBeInTheDocument();
+    expect(screen.getByTitle(/Hand \(Pan Board\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Clear Board/i)).toBeInTheDocument();
-    expect(screen.getByText(/Save Snapshot/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Save Snapshot/i)).toBeNull();
   });
 
   it('exposes snapshot and clear methods via ref', () => {
@@ -92,5 +93,12 @@ describe('Whiteboard Component', () => {
 
     const snapshot = ref.current.getSnapshot();
     expect(snapshot).toContain('data:image/jpeg;base64');
+  });
+
+  it('renders maths dropdown, rgb color control, and eraser mode dropdown', () => {
+    render(<Whiteboard />);
+    expect(screen.getByText('Maths')).toBeInTheDocument();
+    expect(screen.getByTitle('Full RGB Color Control')).toBeInTheDocument();
+    expect(screen.getByTitle('Eraser Modes')).toBeInTheDocument();
   });
 });

@@ -19,7 +19,8 @@ const StreamDispatcher = ({
 }) => {
   const audioRecorderRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
-  const hiddenVideoRef = useRef(null);
+  const videoElemRef = useRef(null);
+  const imageCaptureRef = useRef(null);
 
   // 1. Audio MediaRecorder: Slices audio into timestamped chunks for live transcription
   useEffect(() => {
@@ -55,7 +56,6 @@ const StreamDispatcher = ({
                 sum += vadDataArray[i];
               }
               const avg = sum / vadDataArray.length;
-              // If volume passes threshold (~10%), mark that speech occurred in this interval
               if (avg > 12) {
                 speechActiveInWindow = true;
               }
@@ -93,7 +93,6 @@ const StreamDispatcher = ({
         }
       };
 
-      // Interval to cycle recorder so full headers are produced for each chunk
       const sliceInterval = setInterval(() => {
         if (audioRecorder.state === 'recording') {
           audioRecorder.stop();
@@ -102,10 +101,8 @@ const StreamDispatcher = ({
 
       audioRecorder.onstop = () => {
         const hadSpeech = speechActiveInWindow;
-        speechActiveInWindow = false; // Reset for next window
+        speechActiveInWindow = false;
 
-        // ONLY send if voice energy was actually detected during this window!
-        // This stops sending silence/room hum to Whisper which triggers repetition hallucinations
         if (hadSpeech && audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
           const blob = new Blob(audioChunks, { type: mimeType });
           audioChunks = [];
@@ -126,11 +123,9 @@ const StreamDispatcher = ({
             reader.readAsDataURL(blob);
           }
         } else {
-          // Discard empty/silent chunks
           audioChunks = [];
         }
 
-        // Restart recording next slice if stream is still active
         if (localStream.active && audioRecorder.state === 'inactive') {
           try {
             audioRecorder.start();
@@ -154,28 +149,92 @@ const StreamDispatcher = ({
   }, [localStream, socket, role, clientId, config.AUDIO_CHUNK_INTERVAL_MS]);
 
   // 2. High-frequency Video Snapshots: Captured every 0.5s (500ms)
+  // Uses ImageCapture API (hardware camera frame) with fallback to DOM mounted video
   useEffect(() => {
     if (!socket || !localStream) return;
 
-    const hiddenVideo = document.createElement('video');
-    hiddenVideo.muted = true;
-    hiddenVideo.playsInline = true;
-    hiddenVideo.autoplay = true;
-    hiddenVideoRef.current = hiddenVideo;
-    hiddenVideo.srcObject = localStream;
-    hiddenVideo.play().catch(() => {});
+    // Attach stream to the mounted hidden DOM video element
+    const video = videoElemRef.current;
+    if (video) {
+      video.srcObject = localStream;
+      video.play().catch(() => {});
+    }
 
-    const hiddenCanvas = document.createElement('canvas');
-    hiddenCanvas.width = config.VIDEO_WIDTH;
-    hiddenCanvas.height = config.VIDEO_HEIGHT;
-    hiddenCanvasRef.current = hiddenCanvas;
+    // Try initializing hardware ImageCapture if supported by browser
+    try {
+      const videoTracks = localStream.getVideoTracks();
+      if (videoTracks.length > 0 && window.ImageCapture) {
+        imageCaptureRef.current = new window.ImageCapture(videoTracks[0]);
+      } else {
+        imageCaptureRef.current = null;
+      }
+    } catch (e) {
+      imageCaptureRef.current = null;
+    }
 
-    const videoInterval = setInterval(() => {
-      if (socket.readyState !== WebSocket.OPEN) return;
-      if (hiddenVideo && hiddenVideo.readyState >= 2) {
-        const ctx = hiddenCanvas.getContext('2d');
-        ctx.drawImage(hiddenVideo, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-        const videoDataUrl = hiddenCanvas.toDataURL('image/jpeg', config.VIDEO_QUALITY);
+    const canvas = document.createElement('canvas');
+    canvas.width = config.VIDEO_WIDTH;
+    canvas.height = config.VIDEO_HEIGHT;
+    hiddenCanvasRef.current = canvas;
+
+    let isCapturing = false;
+
+    const captureAndSendFrame = async () => {
+      if (isCapturing || socket.readyState !== WebSocket.OPEN) return;
+      isCapturing = true;
+
+      try {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        let drawn = false;
+
+        // Strategy A: Direct hardware camera capture via ImageCapture (cleanest & highest quality)
+        if (imageCaptureRef.current) {
+          try {
+            const bitmap = await imageCaptureRef.current.grabFrame();
+            if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
+              ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+              drawn = true;
+              if (bitmap.close) bitmap.close();
+            }
+          } catch (icErr) {
+            // Fallback to video element below if grabFrame is busy
+          }
+        }
+
+        // Strategy B: Mounted DOM Video element
+        if (!drawn && video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          drawn = true;
+        }
+
+        if (!drawn) {
+          isCapturing = false;
+          return;
+        }
+
+        // Quick brightness verification: verify frame is not solid black (#000000)
+        try {
+          const sample = ctx.getImageData(
+            Math.floor(canvas.width / 2) - 10,
+            Math.floor(canvas.height / 2) - 10,
+            20,
+            20
+          ).data;
+          let hasLight = false;
+          for (let p = 0; p < sample.length; p += 4) {
+            if (sample[p] > 10 || sample[p + 1] > 10 || sample[p + 2] > 10) {
+              hasLight = true;
+              break;
+            }
+          }
+          if (!hasLight) {
+            // Discard black unrendered frame
+            isCapturing = false;
+            return;
+          }
+        } catch (e) {}
+
+        const videoDataUrl = canvas.toDataURL('image/jpeg', config.VIDEO_QUALITY);
 
         socket.send(JSON.stringify({
           type: 'video_frame',
@@ -184,12 +243,19 @@ const StreamDispatcher = ({
           timestamp: Date.now(),
           dataUrl: videoDataUrl
         }));
+      } catch (frameErr) {
+        console.warn('Frame capture error:', frameErr);
+      } finally {
+        isCapturing = false;
       }
-    }, config.VIDEO_SNAPSHOT_INTERVAL_MS);
+    };
+
+    const videoInterval = setInterval(captureAndSendFrame, config.VIDEO_SNAPSHOT_INTERVAL_MS);
 
     return () => {
       clearInterval(videoInterval);
-      if (hiddenVideo) hiddenVideo.srcObject = null;
+      if (video) video.srcObject = null;
+      imageCaptureRef.current = null;
     };
   }, [socket, localStream, role, clientId, config.VIDEO_SNAPSHOT_INTERVAL_MS, config.VIDEO_WIDTH, config.VIDEO_HEIGHT, config.VIDEO_QUALITY]);
 
@@ -218,7 +284,25 @@ const StreamDispatcher = ({
     };
   }, [socket, whiteboardRef, role, clientId, config.WHITEBOARD_SNAPSHOT_INTERVAL_MS]);
 
-  return null;
+  // Hidden video element mounted directly into the real DOM tree
+  return (
+    <video
+      ref={videoElemRef}
+      autoPlay
+      playsInline
+      muted
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: `${config.VIDEO_WIDTH}px`,
+        height: `${config.VIDEO_HEIGHT}px`,
+        opacity: 0,
+        pointerEvents: 'none',
+        zIndex: -9999
+      }}
+    />
+  );
 };
 
 export default StreamDispatcher;
