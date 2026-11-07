@@ -162,6 +162,34 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
   const [showRuler, setShowRuler] = useState(false);
   const [showCalculator, setShowCalculator] = useState(false);
 
+  // Close menus on outside click or escape key
+  useEffect(() => {
+    const handleGlobalPointerDown = (e) => {
+      // If clicking inside a dropdown or its trigger, let its own handler handle it
+      if (e.target.closest && e.target.closest('[data-dropdown-container]')) {
+        return;
+      }
+      setShowEraserMenu(false);
+      setShowMathMenu(false);
+      setShowRgbPicker(false);
+    };
+
+    const handleGlobalKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setShowEraserMenu(false);
+        setShowMathMenu(false);
+        setShowRgbPicker(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', handleGlobalPointerDown);
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handleGlobalPointerDown);
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, []);
+
   // Stroke Tracking
   const rawPoints = useRef([]);
   const hasMoved = useRef(false);
@@ -1307,9 +1335,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         backgroundColor: '#ffffff',
         borderBottom: '1px solid #e2e8f0',
         boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-        zIndex: 20,
+        zIndex: 50,
         flexWrap: 'nowrap',
-        overflowX: 'auto',
+        overflow: 'visible',
         whiteSpace: 'nowrap'
       }}>
         {/* Basic Tools (Pen, Highlighter, Hand) */}
@@ -1372,7 +1400,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         </div>
 
         {/* Eraser Options Dropdown */}
-        <div style={{ position: 'relative', flexShrink: 0 }}>
+        <div data-dropdown-container="true" style={{ position: 'relative', flexShrink: 0 }}>
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -1385,7 +1413,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
                 if (tool !== 'eraser' && tool !== 'stroke-eraser' && tool !== 'lasso-eraser') {
                   setTool('eraser');
                 } else {
-                  setShowEraserMenu(!showEraserMenu);
+                  setShowEraserMenu(prev => !prev);
+                  setShowMathMenu(false);
+                  setShowRgbPicker(false);
                 }
               }}
               title="Eraser"
@@ -1406,7 +1436,11 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
               </span>
             </button>
             <button
-              onClick={() => setShowEraserMenu(!showEraserMenu)}
+              onClick={() => {
+                setShowEraserMenu(prev => !prev);
+                setShowMathMenu(false);
+                setShowRgbPicker(false);
+              }}
               title="Eraser Modes"
               style={{
                 padding: '5px 5px',
@@ -1508,9 +1542,13 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         </div>
 
         {/* Maths Dropdown Box (Shapes, Protractor, Ruler, Calculator) */}
-        <div style={{ position: 'relative', flexShrink: 0 }}>
+        <div data-dropdown-container="true" style={{ position: 'relative', flexShrink: 0 }}>
           <button
-            onClick={() => setShowMathMenu(!showMathMenu)}
+            onClick={() => {
+              setShowMathMenu(prev => !prev);
+              setShowEraserMenu(false);
+              setShowRgbPicker(false);
+            }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1662,7 +1700,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
 
         {/* Color Palette + Paint.NET Style Square Color Picker */}
         {tool !== 'eraser' && tool !== 'stroke-eraser' && tool !== 'lasso-eraser' && tool !== 'hand' && (
-          <div style={{ display: 'flex', gap: '4px', alignItems: 'center', position: 'relative', flexShrink: 0 }}>
+          <div data-dropdown-container="true" style={{ display: 'flex', gap: '4px', alignItems: 'center', position: 'relative', flexShrink: 0 }}>
             {PRESET_COLORS.map((c) => (
               <button
                 key={c}
@@ -1683,7 +1721,11 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
 
             {/* Square Color Picker Button */}
             <button
-              onClick={() => setShowRgbPicker(!showRgbPicker)}
+              onClick={() => {
+                setShowRgbPicker(prev => !prev);
+                setShowEraserMenu(false);
+                setShowMathMenu(false);
+              }}
               title="Full RGB Color Control"
               style={{
                 width: '22px',
