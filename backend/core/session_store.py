@@ -14,16 +14,17 @@ _whisper_model = None
 _model_lock = threading.Lock()
 
 def ensure_ffmpeg_in_path():
-    """Ensure ffmpeg executable is available in PATH for Whisper on Windows"""
+    """Ensure ffmpeg executable is available in PATH for Whisper"""
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         ffmpeg_dir = os.path.dirname(ffmpeg_exe)
-        # Check if ffmpeg.exe exists in that dir; if not, create alias or copy
-        target_ffmpeg = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+        target_ffmpeg = os.path.join(ffmpeg_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
         if not os.path.exists(target_ffmpeg):
             import shutil
             shutil.copyfile(ffmpeg_exe, target_ffmpeg)
+            if os.name != "nt":
+                os.chmod(target_ffmpeg, 0o755)
         if ffmpeg_dir not in os.environ.get("PATH", ""):
             os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
     except Exception as e:
@@ -35,6 +36,14 @@ def get_whisper_model():
         with _model_lock:
             if _whisper_model is None:
                 ensure_ffmpeg_in_path()
+                # Bypass SSL certificate verification for downloading pre-trained weights
+                # (Resolves SSL: CERTIFICATE_VERIFY_FAILED on macOS and school/campus Wi-Fi networks)
+                import ssl
+                try:
+                    ssl._create_default_https_context = ssl._create_unverified_context
+                except Exception as e:
+                    logger.warning(f"Could not configure unverified SSL context: {e}")
+
                 import whisper
                 logger.info("Loading Whisper 'base.en' model for high-accuracy English transcription...")
                 # base.en is drastically more accurate than tiny and avoids looping hallucinations in noisy rooms

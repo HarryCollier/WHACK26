@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, X, RefreshCw, Layers, Video, Mic, CheckCircle2 } from 'lucide-react';
+import { Activity, X, RefreshCw, Layers, Video, Mic } from 'lucide-react';
 
 const DiagnosticsModal = ({ roomCode, isOpen, onClose }) => {
   const [stats, setStats] = useState(null);

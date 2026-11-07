@@ -30,18 +30,43 @@ A custom tutoring space featuring real-time collaborative whiteboard, WebRTC vid
 
 ---
 
-## How to Run
+## Run with Docker (Recommended for Easy Transfer)
 
-### Step 1: Start Django Backend (Daphne ASGI)
-```powershell
-.\venv\Scripts\python -m daphne -b 0.0.0.0 -p 8000 server.asgi:application
+Ensure Docker Desktop is installed and running, then execute from the project root:
+
+```bash
+docker compose up --build
+```
+
+- **Frontend:** `http://localhost:5173`
+- **Backend API & WebSockets:** `http://localhost:8000`
+
+To stop:
+```bash
+docker compose down
+```
+
+---
+
+## How to Run Locally (Without Docker)
+
+### Step 1: Backend Setup & Launch (Daphne ASGI)
+In your terminal, navigate to the `backend/` directory:
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate       # On Windows: .\venv\Scripts\activate
+pip install -r requirements.txt
+python manage.py migrate
+daphne -b 0.0.0.0 -p 8000 server.asgi:application
 ```
 *(Runs on `http://localhost:8000`)*
 
-### Step 2: Start React Frontend
-In a separate terminal:
-```powershell
+### Step 2: Frontend Setup & Launch (React + Vite)
+In a separate terminal, navigate to the `frontend/` directory:
+```bash
 cd frontend
+npm install
 npm run dev
 ```
 *(Runs on `http://localhost:5173`)*

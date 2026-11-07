@@ -2,7 +2,6 @@ import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } f
 import { 
   Pencil, 
   Eraser, 
-  RotateCcw, 
   Trash2, 
   Highlighter,
   Download
@@ -21,7 +20,6 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
   const [tool, setTool] = useState('pen'); // 'pen', 'highlighter', 'eraser'
   const [color, setColor] = useState('#000000');
   const [size, setSize] = useState(4);
-  const [history, setHistory] = useState([]);
 
   // Provide snapshot extraction handle to parent
   useImperativeHandle(ref, () => ({

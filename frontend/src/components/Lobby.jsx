@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Video, BookOpen, Key, Users } from 'lucide-react';
+import { Video, BookOpen, Users } from 'lucide-react';
 
 const Lobby = ({ onEnterRoom }) => {
   const [activeTab, setActiveTab] = useState('tutor'); // 'tutor' | 'student'
