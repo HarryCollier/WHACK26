@@ -56,6 +56,8 @@ const VideoCall = ({
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            sampleRate: 48000,
+            channelCount: 1
           }
         });
 
@@ -298,6 +300,8 @@ const VideoCall = ({
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 1
         }
       });
       const newAudioTrack = newAudioStream.getAudioTracks()[0];

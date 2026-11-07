@@ -4,6 +4,9 @@ import tempfile
 import os
 import base64
 import logging
+import re
+import numpy as np
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
@@ -12,6 +15,29 @@ logger = logging.getLogger(__name__)
 # Lazy loader for Whisper model to keep startup fast
 _whisper_model = None
 _model_lock = threading.Lock()
+
+def is_hallucinatory_repetition(text: str) -> bool:
+    """Detects repetitive autoregressive hallucination loops (e.g. 'Oh no' x 10 or 'Thank you' x 8)"""
+    if not text:
+        return False
+    words = [w.strip('.,!?:;\"\'').lower() for w in text.split() if w.strip('.,!?:;\"\'')]
+    if len(words) >= 6:
+        counts = Counter(words)
+        _, max_count = counts.most_common(1)[0]
+        # Any single word repeated 5+ times and dominating >= 35% of output
+        if max_count >= 5 and (max_count / len(words)) >= 0.35:
+            return True
+        # Bigram repetition (e.g. 'oh no' repeated 4+ times)
+        bigrams = [' '.join(words[i:i+2]) for i in range(len(words)-1)]
+        b_counts = Counter(bigrams)
+        if b_counts and b_counts.most_common(1)[0][1] >= 4:
+            return True
+        # Trigram repetition (e.g. 'thank you welcome' repeated 3+ times)
+        trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
+        t_counts = Counter(trigrams)
+        if t_counts and t_counts.most_common(1)[0][1] >= 3:
+            return True
+    return False
 
 def ensure_ffmpeg_in_path():
     """Ensure ffmpeg executable is available in PATH for Whisper"""
@@ -45,9 +71,10 @@ def get_whisper_model():
                     logger.warning(f"Could not configure unverified SSL context: {e}")
 
                 import whisper
-                logger.info("Loading Whisper 'base.en' model for high-accuracy English transcription...")
-                # base.en is drastically more accurate than tiny and avoids looping hallucinations in noisy rooms
-                _whisper_model = whisper.load_model("base.en")
+                model_name = os.environ.get("WHISPER_MODEL", "small.en")
+                logger.info(f"Loading Whisper '{model_name}' model for high-accuracy English transcription...")
+                # small.en significantly outperforms base.en in word accuracy, phonetics, and noisy/Bluetooth audio
+                _whisper_model = whisper.load_model(model_name)
     return _whisper_model
 
 @dataclass
@@ -106,25 +133,50 @@ class RoomSessionStore:
                         tmp.write(base64.b64decode(b64_audio))
 
                     try:
+                        import whisper
+                        from whisper.audio import load_audio
+
+                        # 1. Load waveform directly through ffmpeg
+                        audio_data = load_audio(tmp_path)
+                        
+                        # 2. Server-side VAD: Calculate root mean square (energy)
+                        # Ambient background hum is ~0.01-0.025; active speech is >= 0.04
+                        rms = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) > 0 else 0.0
+                        if rms < 0.04:
+                            # Silence or ambient room noise — skip transcription
+                            continue
+
                         model = get_whisper_model()
-                        # Strict decoding parameters to stop looping hallucination on ambient room noise:
+                        if model is None:
+                            continue
+
+                        # Pass the pre-loaded numpy audio array directly to Whisper
                         result = model.transcribe(
-                            tmp_path,
+                            audio_data,
                             fp16=False,
                             language='en',
                             temperature=0.0,
                             beam_size=5,
                             best_of=5,
-                            compression_ratio_threshold=2.2, # Discards repetitive gibberish loops like "I'm like I'm like"
-                            logprob_threshold=-1.0,          # Discards low-confidence background murmur
-                            no_speech_threshold=0.6,         # Treats silence/ambient hum as silence
+                            compression_ratio_threshold=2.2,
+                            logprob_threshold=-1.0,
+                            no_speech_threshold=0.6,
                             condition_on_previous_text=False
                         )
-                        text = result.get("text", "").strip()
+                        raw_text = result.get("text", "").strip()
+
+                        # Strip bracketed subtitle artifacts like [Music], (Silence)
+                        text = re.sub(r'\[.*?\]|\(.*?\)', '', raw_text).strip()
+
                         if text:
-                            # Filter out known repetitive artifacts
-                            if len(text.split()) > 4 and len(set(text.lower().split())) <= 2:
-                                # Repetitive loop hallucination (e.g. "love you love you love you")
+                            # Catch common single-phrase phantom loops on near-silence
+                            hallucinations = {"thank you", "thanks for watching", "bye", "you", "so", "yeah", "don't bother"}
+                            clean_lower = text.lower().strip(" .!?,")
+                            if clean_lower in hallucinations and len(text.split()) <= 3:
+                                pass
+                            # Post-processing n-gram loop rejection filter
+                            elif is_hallucinatory_repetition(text):
+                                logger.warning(f"[{self.room_code}] Suppressed hallucination loop: {text[:60]}...")
                                 pass
                             else:
                                 entry = TranscriptEntry(

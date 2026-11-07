@@ -29,17 +29,62 @@ const StreamDispatcher = ({
       const audioTracks = localStream.getAudioTracks();
       if (audioTracks.length === 0) return;
 
+      // Web Audio API VAD (Voice Activity Detection)
+      let audioCtx = null;
+      let analyser = null;
+      let vadDataArray = null;
+      let speechActiveInWindow = false;
+      let vadAnimId = null;
+
+      try {
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtxClass) {
+          audioCtx = new AudioCtxClass();
+          const source = audioCtx.createMediaStreamSource(localStream);
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.2;
+          source.connect(analyser);
+          vadDataArray = new Uint8Array(analyser.frequencyBinCount);
+
+          const monitorAudioEnergy = () => {
+            if (analyser && vadDataArray) {
+              analyser.getByteFrequencyData(vadDataArray);
+              let sum = 0;
+              for (let i = 0; i < vadDataArray.length; i++) {
+                sum += vadDataArray[i];
+              }
+              const avg = sum / vadDataArray.length;
+              // If volume passes threshold (~10%), mark that speech occurred in this interval
+              if (avg > 12) {
+                speechActiveInWindow = true;
+              }
+            }
+            vadAnimId = requestAnimationFrame(monitorAudioEnergy);
+          };
+          monitorAudioEnergy();
+        }
+      } catch (vadErr) {
+        console.warn('VAD AudioContext initialization skipped', vadErr);
+      }
+
       const audioOnlyStream = new MediaStream(audioTracks);
-      // MediaRecorder options with fallbacks
-      let mimeType = 'audio/webm';
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mimeType = 'audio/webm;codecs=opus';
-      } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-        mimeType = 'audio/ogg;codecs=opus';
+      let mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        if (MediaRecorder.isTypeSupported('audio/webm')) {
+          mimeType = 'audio/webm';
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+          mimeType = 'audio/mp4';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+          mimeType = 'audio/ogg;codecs=opus';
+        }
       }
 
       let audioChunks = [];
-      const audioRecorder = new MediaRecorder(audioOnlyStream, { mimeType });
+      const audioRecorder = new MediaRecorder(audioOnlyStream, { 
+        mimeType: mimeType || undefined,
+        audioBitsPerSecond: 128000
+      });
       audioRecorderRef.current = audioRecorder;
 
       audioRecorder.ondataavailable = (e) => {
@@ -56,13 +101,16 @@ const StreamDispatcher = ({
       }, config.AUDIO_CHUNK_INTERVAL_MS);
 
       audioRecorder.onstop = () => {
-        // Only send if someone was speaking or audio has sufficient volume
-        if (audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
+        const hadSpeech = speechActiveInWindow;
+        speechActiveInWindow = false; // Reset for next window
+
+        // ONLY send if voice energy was actually detected during this window!
+        // This stops sending silence/room hum to Whisper which triggers repetition hallucinations
+        if (hadSpeech && audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
           const blob = new Blob(audioChunks, { type: mimeType });
           audioChunks = [];
 
-          // Don't waste CPU or trigger Whisper hallucinations on tiny empty buffers
-          if (blob.size > 2000) {
+          if (blob.size > 3000) {
             const chunkTimestamp = Date.now();
             const reader = new FileReader();
             reader.onloadend = () => {
@@ -77,6 +125,9 @@ const StreamDispatcher = ({
             };
             reader.readAsDataURL(blob);
           }
+        } else {
+          // Discard empty/silent chunks
+          audioChunks = [];
         }
 
         // Restart recording next slice if stream is still active
@@ -91,6 +142,8 @@ const StreamDispatcher = ({
 
       return () => {
         clearInterval(sliceInterval);
+        if (vadAnimId) cancelAnimationFrame(vadAnimId);
+        if (audioCtx) audioCtx.close().catch(() => {});
         if (audioRecorder.state !== 'inactive') {
           try { audioRecorder.stop(); } catch (e) {}
         }
