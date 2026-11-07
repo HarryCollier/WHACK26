@@ -15,7 +15,9 @@ import {
   PenTool, 
   Eye, 
   X,
-  HelpCircle
+  HelpCircle,
+  Target,
+  FileCheck2
 } from 'lucide-react';
 import { getApiBase } from '../config/apiConfig';
 
@@ -113,7 +115,7 @@ export const LiveEngagementBadge = ({ roomCode, socket, role, onClick }) => {
   );
 };
 
-export default function AICoachPanel({ roomCode, socket, role, isOpen, onClose }) {
+export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, isOpen, onClose }) {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -129,13 +131,19 @@ export default function AICoachPanel({ roomCode, socket, role, isOpen, onClose }
     setLoading(true);
     setError(null);
     try {
+      let currentSnapshot = null;
+      if (whiteboardRef?.current?.getSnapshot) {
+        currentSnapshot = whiteboardRef.current.getSnapshot();
+      }
+
       const url = `${getApiBase()}/api/rooms/${roomCode}/coach/`;
       const options = forceGenerate ? {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey: apiKey.trim() || undefined,
-          provider: provider !== 'auto' ? provider : undefined
+          provider: provider !== 'auto' ? provider : undefined,
+          whiteboardSnapshot: currentSnapshot || undefined
         })
       } : {
         method: 'GET'
@@ -538,6 +546,96 @@ export default function AICoachPanel({ roomCode, socket, role, isOpen, onClose }
                 </div>
               )}
             </div>
+
+            {/* Whiteboard Content & Pupil Alignment */}
+            {report.whiteboard_relevance && (
+              <div style={{
+                backgroundColor: '#1e293b',
+                borderRadius: '10px',
+                padding: '14px 16px',
+                border: '1px solid #334155',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '10px'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Target size={14} color="#38bdf8" />
+                    <span>Pupil Whiteboard Alignment</span>
+                  </div>
+                  <span style={{
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    backgroundColor: (report.whiteboard_relevance.alignment_score || 0) >= 70 ? '#064e3b' : (report.whiteboard_relevance.alignment_score || 0) >= 40 ? '#451a03' : '#450a0a',
+                    color: (report.whiteboard_relevance.alignment_score || 0) >= 70 ? '#6ee7b7' : (report.whiteboard_relevance.alignment_score || 0) >= 40 ? '#fde68a' : '#fca5a5'
+                  }}>
+                    {report.whiteboard_relevance.alignment_score || 0}% Relevant
+                  </span>
+                </div>
+
+                {/* 3 Pillars of Alignment */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                  <div style={{ backgroundColor: '#0f172a', padding: '8px', borderRadius: '6px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '2px' }}>Latest Question</div>
+                    <div style={{
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      color: report.whiteboard_relevance.relevance_to_latest_question === 'High' ? '#4ade80' : report.whiteboard_relevance.relevance_to_latest_question === 'Moderate' ? '#facc15' : '#94a3b8'
+                    }}>
+                      {report.whiteboard_relevance.relevance_to_latest_question || 'N/A'}
+                    </div>
+                  </div>
+
+                  <div style={{ backgroundColor: '#0f172a', padding: '8px', borderRadius: '6px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '2px' }}>Topic Match</div>
+                    <div style={{
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      color: report.whiteboard_relevance.relevance_to_topic === 'High' ? '#4ade80' : report.whiteboard_relevance.relevance_to_topic === 'Moderate' ? '#facc15' : '#f87171'
+                    }}>
+                      {report.whiteboard_relevance.relevance_to_topic || 'Moderate'}
+                    </div>
+                  </div>
+
+                  <div style={{ backgroundColor: '#0f172a', padding: '8px', borderRadius: '6px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '2px' }}>Tutor Interaction</div>
+                    <div style={{
+                      fontSize: '10px',
+                      fontWeight: 700,
+                      color: '#38bdf8',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }} title={report.whiteboard_relevance.interaction_with_tutor_work}>
+                      {report.whiteboard_relevance.interaction_with_tutor_work || 'None'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Observed pupil work */}
+                {report.whiteboard_relevance.observed_pupil_work && (
+                  <div style={{ fontSize: '12px', color: '#cbd5e1', lineHeight: 1.4 }}>
+                    <strong style={{ color: '#f1f5f9' }}>Observed pupil work:</strong> {report.whiteboard_relevance.observed_pupil_work}
+                  </div>
+                )}
+
+                {/* Pedagogical Insight */}
+                {report.whiteboard_relevance.pedagogical_insight && (
+                  <div style={{
+                    backgroundColor: 'rgba(56, 189, 248, 0.08)',
+                    borderLeft: '3px solid #38bdf8',
+                    padding: '8px 10px',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    color: '#bae6fd'
+                  }}>
+                    {report.whiteboard_relevance.pedagogical_insight}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Whiteboard Utilization */}
             {report.whiteboard_feedback && (

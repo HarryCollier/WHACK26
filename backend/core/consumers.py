@@ -182,9 +182,29 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
         if msg_type == "whiteboard_snapshot":
             data_url = content.get("dataUrl", "")
             timestamp = content.get("timestamp", 0)
-            role = content.get("role", self.role or "unknown")
+            role = content.get("role") or self.role or "unknown"
             store.update_whiteboard(data_url, timestamp, role)
             return
+
+        if msg_type == "whiteboard_element":
+            element = content.get("element", {})
+            role = content.get("role") or element.get("role") or self.role or "unknown"
+            client_id = content.get("clientId") or element.get("clientId") or self.client_id or "unknown"
+            store.record_whiteboard_element(element, role, client_id, action="create")
+            # Fall-through to broadcast element to other peers in room
+
+        if msg_type == "whiteboard_stroke":
+            stroke = content.get("stroke", {})
+            role = content.get("role") or stroke.get("role") or self.role or "unknown"
+            client_id = content.get("clientId") or stroke.get("clientId") or self.client_id or "unknown"
+            store.record_whiteboard_element(stroke, role, client_id, action="create")
+            # Fall-through to broadcast stroke to other peers in room
+
+        if msg_type in ("whiteboard_delete_element", "whiteboard_delete_elements"):
+            role = content.get("role") or self.role or "unknown"
+            client_id = content.get("clientId") or self.client_id or "unknown"
+            store.record_whiteboard_element(content, role, client_id, action="delete")
+            # Fall-through to broadcast to other peers in room
 
         # 2. Frequent timestamped Video snapshots (every 0.5s)
         # Labelled separately by role (tutor/student)

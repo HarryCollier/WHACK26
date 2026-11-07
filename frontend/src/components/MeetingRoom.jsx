@@ -126,6 +126,62 @@ const MeetingRoom = ({ session, onLeave }) => {
     };
   }, [roomCode, role, clientId]);
 
+  // Adaptive Background Coaching Evaluation for Tutor
+  // Runs every 90 seconds, and immediately triggers when student makes 3+ active contributions on whiteboard
+  const studentEditsSinceLastEval = useRef(0);
+  const lastAdaptiveEvalTime = useRef(Date.now());
+
+  useEffect(() => {
+    if (role !== 'tutor' || !socket) return;
+
+    const maybeEvaluate = async (reason = 'timer') => {
+      try {
+        const storedKey = localStorage.getItem('whack_llm_key') || undefined;
+        const storedProvider = localStorage.getItem('whack_llm_provider') || undefined;
+        const apiBase = getApiBase();
+
+        await fetch(`${apiBase}/api/rooms/${roomCode}/coach/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: storedKey,
+            provider: storedProvider !== 'auto' ? storedProvider : undefined
+          })
+        });
+        studentEditsSinceLastEval.current = 0;
+        lastAdaptiveEvalTime.current = Date.now();
+      } catch (err) {
+        console.debug('Adaptive coach eval notice:', err);
+      }
+    };
+
+    const handleMessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'whiteboard_element' && (data.role === 'student' || data.element?.role === 'student')) {
+          studentEditsSinceLastEval.current += 1;
+          const now = Date.now();
+          // If student has made 3+ edits and at least 30s have passed since last eval, evaluate sooner!
+          if (studentEditsSinceLastEval.current >= 3 && (now - lastAdaptiveEvalTime.current) >= 30000) {
+            maybeEvaluate('student_activity_spike');
+          }
+        }
+      } catch {}
+    };
+
+    socket.addEventListener('message', handleMessage);
+
+    // Regular 90-second cadence
+    const interval = setInterval(() => {
+      maybeEvaluate('cadence_interval');
+    }, 90000);
+
+    return () => {
+      socket.removeEventListener('message', handleMessage);
+      clearInterval(interval);
+    };
+  }, [role, socket, roomCode]);
+
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcripts]);
@@ -407,6 +463,8 @@ const MeetingRoom = ({ session, onLeave }) => {
           ref={whiteboardRef}
           onStroke={handleStroke}
           socket={socket}
+          role={role}
+          clientId={clientId}
         />
 
         {/* Top-Left: Picture-in-Picture Video Call (approx 1/9th total area) */}
@@ -583,6 +641,7 @@ const MeetingRoom = ({ session, onLeave }) => {
         roomCode={roomCode}
         socket={socket}
         role={role}
+        whiteboardRef={whiteboardRef}
         isOpen={showAICoach}
         onClose={() => setShowAICoach(false)}
       />

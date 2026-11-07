@@ -194,6 +194,12 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
         detail: 'Waiting for student feed'
       };
     }
+    if (pulse.student_wb_active || pulse.status_label === 'Student Writing on Whiteboard') {
+      return {
+        title: 'Writing on Board',
+        detail: 'Active problem solving'
+      };
+    }
     if (pulse.status_color === 'red' || pulse.attention_state === 'confused') {
       return {
         title: 'Confused / Brow Furrow',

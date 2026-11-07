@@ -32,17 +32,26 @@ You are given a multimodal session snapshot containing:
 1. Transcript dialogue with timestamps for Tutor and Student.
 2. Acoustic signals (speech energy, pitch, hesitation, pause count).
 3. Student facial engagement and attention states (gaze direction, brow furrow confusion spikes, head pose).
-4. Whiteboard activity and delta changes.
+4. Whiteboard activity, delta changes, and element logs.
+5. (Multimodal) The current whiteboard image snapshot showing handwritten work, formulas, and diagrams created by the tutor and student.
 
-Your job is to provide concise, empathetic, highly actionable coaching advice for the human TUTOR.
-Evaluate:
-- Pacing & dialogue balance (Is the tutor monologuing? Is the student participating?).
-- Comprehension & friction points (Correlate student brow furrow or silence with what was being discussed).
-- Whiteboard usage (Are abstract ideas backed up by visual sketches?).
+WHITEBOARD VISUAL COLOR CODING & ATTRIBUTION RULES:
+- The whiteboard image has an explicit visual legend at the top:
+  * BLACK/DARK SLATE strokes: Written by the TUTOR (e.g., questions, equation stems like "21 - 1 = ", "12 - 2 = ", diagrams, prompts).
+  * GREEN strokes: Written by the PUPIL/STUDENT (e.g., answers like "16", "14", student calculations, student steps).
+- Critical Attribution Rule:
+  * Distinguish who wrote what based on this color coding!
+  * If the tutor wrote an equation stem in black (e.g. "21 - 1 = ") and the pupil wrote the answer in green (e.g. "16"), DO NOT attribute the entire equation to the student. State that the tutor set the problem and the student answered with "16".
+  * Set "interaction_with_tutor_work" to "Directly answering / building on tutor work" (NOT "Independent work").
+- Topic Relevance & Alignment Scoring:
+  * "relevance_to_topic": Evaluates whether the pupil's work relates to the subject/topic being taught (e.g. math addition, subtraction, arithmetic). If the discussion or problems involve arithmetic/subtraction and the pupil is performing subtraction/arithmetic work, "relevance_to_topic" MUST be "High".
+  * An arithmetic mistake (e.g., answering 16 instead of 20, or 14 instead of 10) is a MATHEMATICAL COMPREHENSION / CALCULATION ERROR, NOT a topic mismatch! The pupil's topic relevance remains "High" and question relevance is "High".
+  * "alignment_score": Reflects how closely the pupil is following and responding to the tutor's prompts (typically 80-100% when answering the tutor's questions).
+  * "pedagogical_insight": Critically analyze the pupil's mathematical understanding: identify the specific answers the pupil provided, diagnose their mathematical misconception (e.g., place value error, subtraction vs addition confusion), and advise the tutor how to guide them.
 
 You MUST respond ONLY with a valid JSON object matching this exact schema:
 {
-  "summary": "2-3 sentences summarizing current dynamic and learning flow",
+  "summary": "2-3 sentences summarizing current dynamic, learning flow, and whiteboard work",
   "comprehension_rating": "High" | "Moderate" | "Needs Attention",
   "comprehension_score": 0 to 100,
   "pacing": {
@@ -50,6 +59,15 @@ You MUST respond ONLY with a valid JSON object matching this exact schema:
     "student_talk_pct": 0 to 100,
     "status": "Balanced" | "Tutor-Heavy" | "Student-Led",
     "advice": "1 clear sentence on pacing"
+  },
+  "whiteboard_relevance": {
+    "student_active_on_board": true | false,
+    "relevance_to_latest_question": "High" | "Moderate" | "Low" | "None" | "N/A",
+    "relevance_to_topic": "High" | "Moderate" | "Low" | "None",
+    "interaction_with_tutor_work": "Directly answering / building on tutor work" | "Independent work" | "Off-topic" | "No work detected",
+    "observed_pupil_work": "1-2 sentences describing what the pupil wrote or drew on the board",
+    "alignment_score": 0 to 100,
+    "pedagogical_insight": "Specific insight into the pupil's mathematical/conceptual understanding based on their visual work"
   },
   "friction_points": [
     {
@@ -115,15 +133,17 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
     logger.info(f"Generating coaching report using provider: {provider}")
 
     prompt_context = telemetry_payload.get("llm_prompt_context", "")
+    wb_telemetry = telemetry_payload.get("whiteboard_telemetry", {})
+    image_data_url = wb_telemetry.get("current_data_url")
 
     report = None
     provider_used = provider
 
     try:
         if provider == "gemini" and gemini_key:
-            report = _call_gemini(prompt_context, gemini_key)
+            report = _call_gemini(prompt_context, gemini_key, image_data_url=image_data_url)
         elif provider == "openai" and openai_key:
-            report = _call_openai(prompt_context, openai_key)
+            report = _call_openai(prompt_context, openai_key, image_data_url=image_data_url)
         elif provider == "ollama":
             report = _call_ollama(prompt_context)
     except Exception as e:
@@ -135,29 +155,60 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
         if provider_used == provider and provider != "heuristic":
             provider_used = "heuristic"
 
+    # Guarantee whiteboard_relevance exists so UI always displays alignment breakdown
+    if not report.get("whiteboard_relevance") or not isinstance(report.get("whiteboard_relevance"), dict):
+        heuristic = _generate_heuristic_report(telemetry_payload)
+        report["whiteboard_relevance"] = heuristic.get("whiteboard_relevance", {})
+
     report["provider_used"] = provider_used
     report["generated_at_ms"] = int(time.time() * 1000)
     return report
 
 
-def _call_gemini(prompt_context: str, api_key: str) -> Dict[str, Any]:
+def _call_gemini(prompt_context: str, api_key: str, image_data_url: Optional[str] = None) -> Dict[str, Any]:
     configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     candidate_models = [configured_model]
-    for fallback in ["gemini-3.5-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]:
+    for fallback in ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
+
+    parts: list = [{"text": f"{COACH_SYSTEM_PROMPT}\n\nHere is the current live session data:\n\n{prompt_context}"}]
+
+    # Attach the whiteboard visual snapshot if present
+    if image_data_url:
+        try:
+            if "," in image_data_url:
+                mime_part, b64_data = image_data_url.split(",", 1)
+                mime_type = "image/jpeg"
+                if "png" in mime_part:
+                    mime_type = "image/png"
+            else:
+                b64_data = image_data_url
+                mime_type = "image/jpeg"
+
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": b64_data
+                }
+            })
+            parts.append({
+                "text": "Above is the latest rendered whiteboard image snapshot.\n"
+                        "COLOR CODING: Black/Slate strokes = Tutor questions/equation stems. Green strokes = Pupil answers/work.\n"
+                        "Note: Attribute the question stem (e.g. '21 - 1 =') to the tutor and the answer (e.g. '16') to the pupil. Set interaction_with_tutor_work to 'Directly answering / building on tutor work'."
+            })
+        except Exception as img_err:
+            logger.warning(f"Failed to prepare whiteboard image for Gemini: {img_err}")
 
     last_err = None
     for model in candidate_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-        full_prompt = f"{COACH_SYSTEM_PROMPT}\n\nHere is the current live session data:\n\n{prompt_context}"
-
         req_data = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": full_prompt}]
+                    "parts": parts
                 }
             ],
             "generationConfig": {
@@ -178,9 +229,9 @@ def _call_gemini(prompt_context: str, api_key: str) -> Dict[str, Any]:
                 result = json.loads(response.read().decode("utf-8"))
                 candidates = result.get("candidates", [])
                 if candidates and "content" in candidates[0]:
-                    parts = candidates[0]["content"].get("parts", [])
-                    if parts and "text" in parts[0]:
-                        return _clean_and_parse_json(parts[0]["text"])
+                    res_parts = candidates[0]["content"].get("parts", [])
+                    if res_parts and "text" in res_parts[0]:
+                        return _clean_and_parse_json(res_parts[0]["text"])
         except urllib.error.HTTPError as err:
             last_err = err
             logger.warning(f"Gemini model '{model}' failed with status {err.code}. Trying next candidate...")
@@ -195,17 +246,25 @@ def _call_gemini(prompt_context: str, api_key: str) -> Dict[str, Any]:
     raise ValueError("Empty or invalid response from Gemini API")
 
 
-def _call_openai(prompt_context: str, api_key: str) -> Dict[str, Any]:
+def _call_openai(prompt_context: str, api_key: str, image_data_url: Optional[str] = None) -> Dict[str, Any]:
     model = os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     url = "https://api.openai.com/v1/chat/completions"
 
     full_prompt = f"Here is the current live session data:\n\n{prompt_context}"
 
+    user_content: list = [{"type": "text", "text": full_prompt}]
+    if image_data_url:
+        img_url = image_data_url if image_data_url.startswith("data:") else f"data:image/jpeg;base64,{image_data_url}"
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": img_url, "detail": "low"}
+        })
+
     req_data = {
         "model": model,
         "messages": [
             {"role": "system", "content": COACH_SYSTEM_PROMPT},
-            {"role": "user", "content": full_prompt}
+            {"role": "user", "content": user_content}
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.3
@@ -342,15 +401,40 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
             "recommendation": "Re-engage student with an interactive check-in or request them to write on the whiteboard."
         })
 
-    # 3. Whiteboard Feedback
+    # 3. Whiteboard Feedback & Content Relevance
     wb_summary = whiteboard.get("summary", {})
     total_wb_changes = wb_summary.get("total_changes", 0)
     major_edits = wb_summary.get("major_edits", 0)
+    student_edits = whiteboard.get("student_edits", 0)
+    tutor_edits = whiteboard.get("tutor_edits", 0)
+
+    if student_edits > 0:
+        wb_relevance = {
+            "student_active_on_board": True,
+            "relevance_to_latest_question": "High",
+            "relevance_to_topic": "High",
+            "interaction_with_tutor_work": "Directly answering / building on tutor work" if tutor_edits > 0 else "Independent work",
+            "observed_pupil_work": f"Student made {student_edits} active visual whiteboard contributions (handwritten equations/diagrams).",
+            "alignment_score": min(95, 60 + student_edits * 5),
+            "pedagogical_insight": "Pupil is actively externalizing their problem solving on the whiteboard in response to prompts."
+        }
+    else:
+        wb_relevance = {
+            "student_active_on_board": False,
+            "relevance_to_latest_question": "N/A",
+            "relevance_to_topic": "Moderate",
+            "interaction_with_tutor_work": "No work detected",
+            "observed_pupil_work": "No student writing or drawing detected on the whiteboard yet.",
+            "alignment_score": 50,
+            "pedagogical_insight": "Encourage the pupil to write down their intermediate steps on the whiteboard to assess their reasoning."
+        }
 
     if total_wb_changes == 0:
         wb_feedback = "Whiteboard has not been used yet. Consider drawing diagrams or equations to anchor visual understanding."
+    elif student_edits > 0:
+        wb_feedback = f"Active collaborative whiteboard utilization: Student contributed {student_edits} edits, directly interacting with session material."
     elif major_edits > 0:
-        wb_feedback = f"Active whiteboard utilization with {major_edits} significant diagram/formula updates."
+        wb_feedback = f"Active whiteboard utilization with {major_edits} significant updates from tutor. Prompt student to write on the board."
     else:
         wb_feedback = "Whiteboard contains initial content but has been idle. Use the pen to highlight key terms as you talk."
 
@@ -388,6 +472,7 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
             "status": pacing_status,
             "advice": pacing_advice
         },
+        "whiteboard_relevance": wb_relevance,
         "friction_points": friction_points,
         "whiteboard_feedback": wb_feedback,
         "actionable_tips": actionable_tips
