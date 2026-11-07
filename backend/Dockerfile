@@ -2,15 +2,17 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies needed for audio/video processing, OpenCV, and MediaPipe
+# Install system dependencies needed for audio/video processing, OpenCV, MediaPipe, and PyTorch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libgl1 \
-    libgl1-mesa-glx \
+    libglx-mesa0 \
     libegl1 \
     libgles2 \
     libglib2.0-0 \
     libsndfile1 \
+    libgomp1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install via pip

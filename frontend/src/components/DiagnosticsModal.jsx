@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Activity, X, RefreshCw, Layers, Video, Mic, Brain, MessageSquare, Eye, PenTool } from 'lucide-react';
+import { getApiBase } from '../config/apiConfig';
 
 // ── Colour helpers ─────────────────────────────────────────────────────────
 const ROLE_COLOUR = { tutor: '#38bdf8', student: '#4ade80' };
@@ -368,9 +369,10 @@ const DiagnosticsModal = ({ roomCode, isOpen, onClose }) => {
     if (!roomCode) return;
     setLoading(true);
     try {
+      const apiBase = getApiBase();
       const [sRes, tRes] = await Promise.all([
-        fetch(`http://localhost:8000/api/rooms/${roomCode}/stats/`),
-        fetch(`http://localhost:8000/api/rooms/${roomCode}/telemetry/`)
+        fetch(`${apiBase}/api/rooms/${roomCode}/stats/`),
+        fetch(`${apiBase}/api/rooms/${roomCode}/telemetry/`)
       ]);
       if (sRes.ok) setStats(await sRes.json());
       if (tRes.ok) setTelemetry(await tRes.json());

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Video, BookOpen, Users } from 'lucide-react';
+import { getApiBase } from '../config/apiConfig';
 
 const Lobby = ({ onEnterRoom }) => {
   const [activeTab, setActiveTab] = useState('tutor'); // 'tutor' | 'student'
@@ -9,7 +10,7 @@ const Lobby = ({ onEnterRoom }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const backendUrl = 'http://localhost:8000';
+  const backendUrl = getApiBase();
 
   const handleCreateRoom = async (e) => {
     e.preventDefault();

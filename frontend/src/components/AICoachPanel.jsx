@@ -17,6 +17,7 @@ import {
   X,
   HelpCircle
 } from 'lucide-react';
+import { getApiBase } from '../config/apiConfig';
 
 export const LiveEngagementBadge = ({ roomCode, socket, role, onClick }) => {
   const [pulse, setPulse] = useState({
@@ -51,7 +52,7 @@ export const LiveEngagementBadge = ({ roomCode, socket, role, onClick }) => {
     // 2. 15-second polling fallback
     const fetchPulse = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/rooms/${roomCode}/engagement/`);
+        const res = await fetch(`${getApiBase()}/api/rooms/${roomCode}/engagement/`);
         if (res.ok) {
           const data = await res.json();
           if (isMounted) setPulse(data);
@@ -128,7 +129,7 @@ export default function AICoachPanel({ roomCode, socket, role, isOpen, onClose }
     setLoading(true);
     setError(null);
     try {
-      const url = `http://localhost:8000/api/rooms/${roomCode}/coach/`;
+      const url = `${getApiBase()}/api/rooms/${roomCode}/coach/`;
       const options = forceGenerate ? {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

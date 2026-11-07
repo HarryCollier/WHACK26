@@ -256,7 +256,12 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         if (data.type === 'whiteboard_stroke') {
           drawRemoteStroke(data.stroke);
         } else if (data.type === 'whiteboard_element') {
-          elementsRef.current.push(data.element);
+          const idx = elementsRef.current.findIndex(el => el.id === data.element.id);
+          if (idx !== -1) {
+            elementsRef.current[idx] = data.element;
+          } else {
+            elementsRef.current.push(data.element);
+          }
           redrawAll();
         } else if (data.type === 'whiteboard_delete_element') {
           elementsRef.current = elementsRef.current.filter(el => el.id !== data.elementId);
@@ -900,6 +905,9 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
     activeTouches.current.delete(e.pointerId);
 
     if (isTwoFingerNavigating.current) {
+      isDrawing.current = false;
+      rawPoints.current = [];
+      lastDrawnPos.current = null;
       if (activeTouches.current.size < 2) {
         isTwoFingerNavigating.current = false;
         touchNavStart.current = null;
@@ -1002,6 +1010,13 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       elementsRef.current.push(newDotElement);
       redrawAll();
 
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_element',
+          element: newDotElement
+        }));
+      }
+
       if (onStroke && rect.width > 0 && rect.height > 0) {
         onStroke({
           x0: p.x / rect.width,
@@ -1026,6 +1041,13 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         points: [...pts]
       };
       elementsRef.current.push(newStrokeElement);
+
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_element',
+          element: newStrokeElement
+        }));
+      }
 
       if (onStroke && rect.width > 0 && rect.height > 0) {
         onStroke({

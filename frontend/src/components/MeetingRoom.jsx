@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X } from 'lucide-react';
+import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X, GripHorizontal, Minimize2, Maximize2 } from 'lucide-react';
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
 import DiagnosticsModal from './DiagnosticsModal';
-import AICoachPanel, { LiveEngagementBadge } from './AICoachPanel';
+import AICoachPanel from './AICoachPanel';
+import StudentStateWidget from './StudentStateWidget';
+import { getWebSocketUrl } from '../config/apiConfig';
 
 const MeetingRoom = ({ session, onLeave }) => {
   const { roomCode, title, role } = session;
@@ -18,6 +20,12 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [showAICoach, setShowAICoach] = useState(false);
   const [showDialogue, setShowDialogue] = useState(false);
 
+  // Picture-in-Picture window position & collapse state
+  const [pipPos, setPipPos] = useState({ x: 16, y: 56 });
+  const [pipCollapsed, setPipCollapsed] = useState(false);
+  const isDraggingPip = useRef(false);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+
   const whiteboardRef = useRef(null);
   const clientId = useRef(`${role}_${Math.random().toString(36).substring(2, 9)}`).current;
   const wsRef = useRef(null);
@@ -28,7 +36,7 @@ const MeetingRoom = ({ session, onLeave }) => {
     let isMounted = true;
 
     function connectWs() {
-      const wsUrl = `ws://localhost:8000/ws/meeting/${roomCode}/`;
+      const wsUrl = getWebSocketUrl(roomCode);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -111,6 +119,29 @@ const MeetingRoom = ({ session, onLeave }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handlePipPointerDown = (e) => {
+    isDraggingPip.current = true;
+    dragOffsetRef.current = {
+      x: e.clientX - pipPos.x,
+      y: e.clientY - pipPos.y
+    };
+    try { e.target.setPointerCapture(e.pointerId); } catch {}
+  };
+
+  const handlePipPointerMove = (e) => {
+    if (!isDraggingPip.current) return;
+    const maxX = Math.max(10, window.innerWidth - (pipCollapsed ? 180 : 360));
+    const maxY = Math.max(50, window.innerHeight - (pipCollapsed ? 60 : 240));
+    const nextX = Math.max(8, Math.min(maxX, e.clientX - dragOffsetRef.current.x));
+    const nextY = Math.max(52, Math.min(maxY, e.clientY - dragOffsetRef.current.y));
+    setPipPos({ x: nextX, y: nextY });
+  };
+
+  const handlePipPointerUp = (e) => {
+    isDraggingPip.current = false;
+    try { e.target.releasePointerCapture(e.pointerId); } catch {}
+  };
+
   return (
     <div style={{
       display: 'flex',
@@ -171,16 +202,6 @@ const MeetingRoom = ({ session, onLeave }) => {
             <Users size={14} />
             <span>{peerPresence}</span>
           </div>
-
-          {/* Tutor Live Engagement Indicator */}
-          {role === 'tutor' && (
-            <LiveEngagementBadge
-              roomCode={roomCode}
-              socket={socket}
-              role={role}
-              onClick={() => setShowAICoach(true)}
-            />
-          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -276,79 +297,147 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
       </header>
 
-      {/* Main Split Body */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Whiteboard Workspace */}
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-          <Whiteboard
-            ref={whiteboardRef}
-            onStroke={handleStroke}
-            socket={socket}
-          />
+      {/* Main Full-Width Whiteboard Canvas with PiP & Tutor State Overlays */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', width: '100%', height: '100%' }}>
+        {/* Full-width Whiteboard Workspace */}
+        <Whiteboard
+          ref={whiteboardRef}
+          onStroke={handleStroke}
+          socket={socket}
+        />
 
-          {/* Real-time Floating Subtitles Overlay */}
-          {transcripts.length > 0 && (
-            <div style={{
-              position: 'absolute',
-              bottom: '24px',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              maxWidth: '80%',
-              zIndex: 30,
-              pointerEvents: 'none',
+        {/* Top-Left: Picture-in-Picture Video Call (approx 1/9th total area) */}
+        <div
+          style={{
+            position: 'absolute',
+            left: `${pipPos.x}px`,
+            top: `${pipPos.y}px`,
+            width: pipCollapsed ? 'auto' : 'clamp(290px, 25vw, 360px)',
+            height: pipCollapsed ? '40px' : 'clamp(185px, 22vh, 235px)',
+            zIndex: 35,
+            boxShadow: '0 12px 36px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.1)',
+            borderRadius: '14px',
+            overflow: 'hidden',
+            backgroundColor: '#0f172a',
+            display: 'flex',
+            flexDirection: 'column',
+            transition: isDraggingPip.current ? 'none' : 'width 0.2s ease, height 0.2s ease'
+          }}
+        >
+          {/* PiP Header & Drag Handle */}
+          <div
+            onPointerDown={handlePipPointerDown}
+            onPointerMove={handlePipPointerMove}
+            onPointerUp={handlePipPointerUp}
+            style={{
               display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-              alignItems: 'center'
-            }}>
-              {transcripts.slice(-2).map((t, idx) => {
-                const isTutor = t.role === 'tutor';
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      backgroundColor: 'rgba(15, 23, 42, 0.90)',
-                      backdropFilter: 'blur(8px)',
-                      border: `1px solid ${isTutor ? 'rgba(56, 189, 248, 0.5)' : 'rgba(74, 222, 128, 0.5)'}`,
-                      borderRadius: '8px',
-                      padding: '8px 16px',
-                      color: '#f8fafc',
-                      fontSize: '14px',
-                      lineHeight: '1.4',
-                      boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
-                      textAlign: 'center',
-                      pointerEvents: 'auto',
-                      maxWidth: '100%'
-                    }}
-                  >
-                    <span style={{
-                      color: isTutor ? '#38bdf8' : '#4ade80',
-                      fontWeight: 700,
-                      marginRight: '8px',
-                      textTransform: 'uppercase',
-                      fontSize: '11px',
-                      letterSpacing: '0.05em'
-                    }}>
-                      {isTutor ? 'Tutor' : 'Student'}:
-                    </span>
-                    <span>{t.text}</span>
-                  </div>
-                );
-              })}
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '5px 10px',
+              backgroundColor: 'rgba(15, 23, 42, 0.95)',
+              borderBottom: pipCollapsed ? 'none' : '1px solid rgba(51, 65, 85, 0.7)',
+              cursor: 'grab',
+              userSelect: 'none',
+              zIndex: 25
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#94a3b8', fontSize: '11px', fontWeight: 600 }}>
+              <GripHorizontal size={14} color="#64748b" />
+              <span>Live Video {pipCollapsed ? `(${role === 'tutor' ? 'Student' : 'Tutor'})` : ''}</span>
             </div>
-          )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setPipCollapsed(c => !c);
+              }}
+              title={pipCollapsed ? "Expand Video" : "Collapse Video"}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: '2px'
+              }}
+            >
+              {pipCollapsed ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+            </button>
+          </div>
+
+          {/* Video Container (keeps video call mounted even when collapsed) */}
+          <div style={{ flex: 1, position: 'relative', display: pipCollapsed ? 'none' : 'block' }}>
+            <VideoCall
+              socket={socket}
+              roomCode={roomCode}
+              role={role}
+              clientId={clientId}
+              onLocalMediaReady={(stream) => setLocalStream(stream)}
+              pipMode={true}
+            />
+          </div>
         </div>
 
-        {/* Right Sidebar: Video Call */}
-        <div style={{ width: '320px', height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <VideoCall
-            socket={socket}
+        {/* Top-Right: Tutor Student State Widget (Tutor only, right side clear for student) */}
+        {role === 'tutor' && (
+          <StudentStateWidget
             roomCode={roomCode}
-            role={role}
-            clientId={clientId}
-            onLocalMediaReady={(stream) => setLocalStream(stream)}
+            socket={socket}
+            onOpenReport={() => setShowAICoach(true)}
           />
-        </div>
+        )}
+
+        {/* Real-time Floating Subtitles Overlay */}
+        {transcripts.length > 0 && (
+          <div style={{
+            position: 'absolute',
+            bottom: '24px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            maxWidth: '80%',
+            zIndex: 30,
+            pointerEvents: 'none',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            alignItems: 'center'
+          }}>
+            {transcripts.slice(-2).map((t, idx) => {
+              const isTutor = t.role === 'tutor';
+              return (
+                <div
+                  key={idx}
+                  style={{
+                    backgroundColor: 'rgba(15, 23, 42, 0.90)',
+                    backdropFilter: 'blur(8px)',
+                    border: `1px solid ${isTutor ? 'rgba(56, 189, 248, 0.5)' : 'rgba(74, 222, 128, 0.5)'}`,
+                    borderRadius: '8px',
+                    padding: '8px 16px',
+                    color: '#f8fafc',
+                    fontSize: '14px',
+                    lineHeight: '1.4',
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                    textAlign: 'center',
+                    pointerEvents: 'auto',
+                    maxWidth: '100%'
+                  }}
+                >
+                  <span style={{
+                    color: isTutor ? '#38bdf8' : '#4ade80',
+                    fontWeight: 700,
+                    marginRight: '8px',
+                    textTransform: 'uppercase',
+                    fontSize: '11px',
+                    letterSpacing: '0.05em'
+                  }}>
+                    {isTutor ? 'Tutor' : 'Student'}:
+                  </span>
+                  <span>{t.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Stream Dispatcher with configurable sample rates */}
