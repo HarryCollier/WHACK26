@@ -101,17 +101,27 @@ class RoomSessionStore:
     # "store the most recent whiteboard data and all previous whiteboard data as two separate stores"
     most_recent_whiteboard: Optional[Dict[str, Any]] = None
     all_whiteboards_history: List[Dict[str, Any]] = field(default_factory=list)
+    # Whiteboard delta features computed each time a new snapshot arrives
+    whiteboard_deltas: List[Dict[str, Any]] = field(default_factory=list)
 
     # 2. Video frames store: 0.5s snapshots partitioned by role
     video_frames: Dict[str, List[VideoFrameEntry]] = field(default_factory=lambda: {"tutor": [], "student": []})
+    # Extracted feature dicts for a *sample* of video frames (every Nth frame to avoid memory bloat)
+    video_frame_features: Dict[str, List[Dict[str, Any]]] = field(default_factory=lambda: {"tutor": [], "student": []})
+    _video_frame_counter: Dict[str, int] = field(default_factory=lambda: {"tutor": 0, "student": 0})
 
     # 3. Live transcript entries timestamped
     transcripts: List[TranscriptEntry] = field(default_factory=list)
+    # Acoustic features keyed by transcript entry timestamp
+    audio_features_by_chunk: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
     # Audio transcription queue and background thread
     audio_queue: queue.Queue = field(default_factory=queue.Queue)
     is_running: bool = True
     worker_thread: Optional[threading.Thread] = None
+
+    # How many video frames to skip between feature extractions (reduces CPU load)
+    VIDEO_ANALYSIS_STRIDE: int = 10
 
     def start_transcription_worker(self, on_transcript_callback=None):
         def worker():
@@ -168,6 +178,8 @@ class RoomSessionStore:
                         # Strip bracketed subtitle artifacts like [Music], (Silence)
                         text = re.sub(r'\[.*?\]|\(.*?\)', '', raw_text).strip()
 
+                        segments = result.get("segments", [])
+
                         if text:
                             # Catch common single-phrase phantom loops on near-silence
                             hallucinations = {"thank you", "thanks for watching", "bye", "you", "so", "yeah", "don't bother"}
@@ -187,6 +199,16 @@ class RoomSessionStore:
                                 )
                                 self.transcripts.append(entry)
                                 logger.info(f"[{self.room_code}] [{role}] Transcribed: {text}")
+
+                                # ── Acoustic feature extraction (non-blocking, same thread) ──
+                                try:
+                                    from .extractors.audio_features import extract_audio_features
+                                    features = extract_audio_features(b64_audio, whisper_segments=segments)
+                                    self.audio_features_by_chunk[timestamp] = features
+                                    logger.debug(f"[{self.room_code}] [{role}] Audio features: {features.get('confidence_signal')}")
+                                except Exception as af_err:
+                                    logger.warning(f"[{self.room_code}] Audio feature extraction failed: {af_err}")
+
                                 if on_transcript_callback:
                                     on_transcript_callback(entry)
                     finally:
@@ -210,14 +232,31 @@ class RoomSessionStore:
             "role": role,
             "dataUrl": data_url
         }
-        # Once new whiteboard data is transferred, add the old most recent whiteboard data to all whiteboard data store
+        # Compute delta before rotating the store
         if self.most_recent_whiteboard is not None:
+            try:
+                from .extractors.whiteboard_features import extract_whiteboard_delta
+                delta = extract_whiteboard_delta(
+                    self.most_recent_whiteboard["dataUrl"],
+                    data_url
+                )
+                delta["current_timestamp"] = timestamp
+                delta["previous_timestamp"] = self.most_recent_whiteboard.get("timestamp")
+                self.whiteboard_deltas.append(delta)
+                logger.debug(f"[{self.room_code}] Whiteboard delta: {delta.get('change_level')} ({delta.get('change_percent')}%)")
+            except Exception as e:
+                logger.warning(f"[{self.room_code}] Whiteboard delta extraction failed: {e}")
+
+            # Once new whiteboard data is transferred, add the old most recent whiteboard data to all whiteboard data store
             self.all_whiteboards_history.append(self.most_recent_whiteboard)
         self.most_recent_whiteboard = new_data
 
     def add_video_frame(self, role: str, client_id: str, timestamp: int, data_url: str):
         if role not in self.video_frames:
             self.video_frames[role] = []
+            self._video_frame_counter[role] = 0
+            self.video_frame_features[role] = []
+
         # Keep indexed by timestamp
         self.video_frames[role].append(VideoFrameEntry(
             role=role,
@@ -225,6 +264,18 @@ class RoomSessionStore:
             timestamp=timestamp,
             data_url=data_url
         ))
+
+        # Run video feature extraction on every Nth frame (stride) to avoid CPU overload
+        self._video_frame_counter[role] = self._video_frame_counter.get(role, 0) + 1
+        if self._video_frame_counter[role] % self.VIDEO_ANALYSIS_STRIDE == 0:
+            try:
+                from .extractors.video_features import extract_video_features
+                features = extract_video_features(data_url)
+                features["timestamp_ms"] = timestamp
+                self.video_frame_features[role].append(features)
+                logger.debug(f"[{self.room_code}] [{role}] Video features: {features.get('engagement_label')} gaze={features.get('gaze_direction')}")
+            except Exception as e:
+                logger.warning(f"[{self.room_code}] Video feature extraction failed: {e}")
 
     def add_audio_chunk(self, role: str, client_id: str, timestamp: int, b64_audio: str):
         self.audio_queue.put((role, client_id, timestamp, b64_audio))
@@ -235,8 +286,11 @@ class RoomSessionStore:
         self.audio_queue.put(None)
         self.most_recent_whiteboard = None
         self.all_whiteboards_history.clear()
+        self.whiteboard_deltas.clear()
         self.video_frames.clear()
+        self.video_frame_features.clear()
         self.transcripts.clear()
+        self.audio_features_by_chunk.clear()
         self.active_peers.clear()
         logger.info(f"Session data for room {self.room_code} completely wiped from memory.")
 
