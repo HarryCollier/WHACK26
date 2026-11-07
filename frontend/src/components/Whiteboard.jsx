@@ -21,7 +21,9 @@ import {
   RotateCw,
   Hand,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  Undo2,
+  Redo2
 } from 'lucide-react';
 
 const PRESET_COLORS = [
@@ -169,6 +171,23 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
   // Persistent vector element store (all stored in world coordinates)
   const elementsRef = useRef([]);
 
+  // Undo / Redo Stacks (records actions: { type: 'add', element } | { type: 'delete', element, index } | { type: 'batch_delete', items: [{ element, index }] })
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  const updateHistoryState = () => {
+    setCanUndo(undoStackRef.current.length > 0);
+    setCanRedo(redoStackRef.current.length > 0);
+  };
+
+  const pushUndoAction = (action) => {
+    undoStackRef.current.push(action);
+    redoStackRef.current = []; // Clear redo stack on new user action
+    updateHistoryState();
+  };
+
   // Live shape and lasso preview state (screen coordinates)
   const [activeShapePreview, setActiveShapePreview] = useState(null);
   const [activeLassoPoints, setActiveLassoPoints] = useState(null);
@@ -281,6 +300,36 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
     socket.addEventListener('message', handleMessage);
     return () => socket.removeEventListener('message', handleMessage);
   }, [socket]);
+
+  // Keyboard shortcuts for Undo (Ctrl+Z / Cmd+Z) and Redo (Ctrl+Y / Cmd+Y / Ctrl+Shift+Z / Cmd+Shift+Z)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't intercept shortcuts when typing in inputs/textareas/contentEditable
+      const tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) {
+        return;
+      }
+
+      const isModifier = e.ctrlKey || e.metaKey;
+      if (!isModifier) return;
+
+      const key = e.key.toLowerCase();
+
+      // Undo: Ctrl+Z or Cmd+Z (without Shift)
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } 
+      // Redo: Ctrl+Y or Cmd+Y OR Ctrl+Shift+Z / Cmd+Shift+Z
+      else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Full redraw of the canvas with current Zoom and Pan
   const redrawAll = () => {
@@ -413,6 +462,114 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
 
   const clearCanvasLocal = () => {
     elementsRef.current = [];
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    updateHistoryState();
+    redrawAll();
+  };
+
+  // Undo / Redo Handlers
+  const handleUndo = () => {
+    if (undoStackRef.current.length === 0) return;
+    const action = undoStackRef.current.pop();
+
+    if (action.type === 'add') {
+      // Undo an added element -> remove it from elementsRef and broadcast deletion
+      const idx = elementsRef.current.findIndex(el => el.id === action.element.id);
+      if (idx !== -1) {
+        const removed = elementsRef.current.splice(idx, 1)[0];
+        redoStackRef.current.push({ type: 'add', element: removed, index: idx });
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'whiteboard_delete_element',
+            elementId: removed.id
+          }));
+        }
+      }
+    } else if (action.type === 'delete') {
+      // Undo single deletion -> re-insert element at its original index and broadcast element
+      const insertIdx = Math.min(action.index, elementsRef.current.length);
+      elementsRef.current.splice(insertIdx, 0, action.element);
+      redoStackRef.current.push({ type: 'delete', element: action.element, index: insertIdx });
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_element',
+          element: action.element
+        }));
+      }
+    } else if (action.type === 'batch_delete') {
+      // Undo batch deletion (e.g. lasso or sweep eraser) -> re-insert elements and broadcast
+      const restoredItems = [];
+      const restoredElements = [];
+      for (const item of action.items) {
+        const insertIdx = Math.min(item.index, elementsRef.current.length);
+        elementsRef.current.splice(insertIdx, 0, item.element);
+        restoredItems.push({ element: item.element, index: insertIdx });
+        restoredElements.push(item.element);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'whiteboard_element',
+            element: item.element
+          }));
+        }
+      }
+      redoStackRef.current.push({ type: 'batch_delete', items: restoredItems });
+    }
+
+    updateHistoryState();
+    redrawAll();
+  };
+
+  const handleRedo = () => {
+    if (redoStackRef.current.length === 0) return;
+    const action = redoStackRef.current.pop();
+
+    if (action.type === 'add') {
+      // Redo add -> re-insert element and broadcast
+      const insertIdx = action.index !== undefined ? Math.min(action.index, elementsRef.current.length) : elementsRef.current.length;
+      elementsRef.current.splice(insertIdx, 0, action.element);
+      undoStackRef.current.push({ type: 'add', element: action.element });
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_element',
+          element: action.element
+        }));
+      }
+    } else if (action.type === 'delete') {
+      // Redo delete -> remove element and broadcast deletion
+      const idx = elementsRef.current.findIndex(el => el.id === action.element.id);
+      if (idx !== -1) {
+        const removed = elementsRef.current.splice(idx, 1)[0];
+        undoStackRef.current.push({ type: 'delete', element: removed, index: idx });
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'whiteboard_delete_element',
+            elementId: removed.id
+          }));
+        }
+      }
+    } else if (action.type === 'batch_delete') {
+      // Redo batch delete -> remove elements and broadcast deletion
+      const deletedItems = [];
+      const deletedIds = [];
+      for (const item of action.items) {
+        const idx = elementsRef.current.findIndex(el => el.id === item.element.id);
+        if (idx !== -1) {
+          const removed = elementsRef.current.splice(idx, 1)[0];
+          deletedItems.push({ element: removed, index: idx });
+          deletedIds.push(removed.id);
+        }
+      }
+      undoStackRef.current.push({ type: 'batch_delete', items: deletedItems });
+      if (deletedIds.length > 0 && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_delete_elements',
+          elementIds: deletedIds
+        }));
+      }
+    }
+
+    updateHistoryState();
     redrawAll();
   };
 
@@ -717,6 +874,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       if (hitIdx !== -1) {
         const deletedEl = elementsRef.current[hitIdx];
         elementsRef.current.splice(hitIdx, 1);
+        pushUndoAction({ type: 'delete', element: deletedEl, index: hitIdx });
         redrawAll();
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({
@@ -811,15 +969,18 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
 
       if (lastP) {
         const toDeleteIds = [];
-        elementsRef.current = elementsRef.current.filter(el => {
+        const deletedItems = [];
+        elementsRef.current = elementsRef.current.filter((el, idx) => {
           if (isElementCrossedByEraser(lastP, wPos, el, 18)) {
             toDeleteIds.push(el.id);
+            deletedItems.push({ element: el, index: idx });
             return false;
           }
           return true;
         });
 
         if (toDeleteIds.length > 0) {
+          pushUndoAction({ type: 'batch_delete', items: deletedItems });
           redrawAll();
           if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
@@ -940,15 +1101,18 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
 
       if (lassoWorldPts && lassoWorldPts.length >= 3) {
         const toDeleteIds = [];
-        elementsRef.current = elementsRef.current.filter(el => {
+        const deletedItems = [];
+        elementsRef.current = elementsRef.current.filter((el, idx) => {
           if (isElementInLasso(lassoWorldPts, el)) {
             toDeleteIds.push(el.id);
+            deletedItems.push({ element: el, index: idx });
             return false;
           }
           return true;
         });
 
         if (toDeleteIds.length > 0) {
+          pushUndoAction({ type: 'batch_delete', items: deletedItems });
           redrawAll();
           if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
@@ -979,6 +1143,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
           size
         };
         elementsRef.current.push(newShape);
+        pushUndoAction({ type: 'add', element: newShape });
         redrawAll();
 
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1008,6 +1173,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         points: [p]
       };
       elementsRef.current.push(newDotElement);
+      pushUndoAction({ type: 'add', element: newDotElement });
       redrawAll();
 
       if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1041,6 +1207,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
         points: [...pts]
       };
       elementsRef.current.push(newStrokeElement);
+      pushUndoAction({ type: 'add', element: newStrokeElement });
 
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
@@ -1118,6 +1285,7 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
       y: centerWorld.y
     };
     elementsRef.current.push(newTextElement);
+    pushUndoAction({ type: 'add', element: newTextElement });
     redrawAll();
 
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1575,6 +1743,46 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
             </span>
           </div>
         )}
+
+        {/* Undo and Redo buttons */}
+        <div style={{ display: 'flex', gap: '2px', background: '#f8fafc', padding: '2px', borderRadius: '8px', border: '1px solid #e2e8f0', flexShrink: 0 }}>
+          <button
+            onClick={handleUndo}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z / Cmd+Z)"
+            style={{
+              padding: '5px 8px',
+              borderRadius: '6px',
+              background: 'transparent',
+              color: canUndo ? '#334155' : '#cbd5e1',
+              border: 'none',
+              cursor: canUndo ? 'pointer' : 'not-allowed',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontSize: '12px'
+            }}>
+            <Undo2 size={16} />
+          </button>
+          <button
+            onClick={handleRedo}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Y / Cmd+Y)"
+            style={{
+              padding: '5px 8px',
+              borderRadius: '6px',
+              background: 'transparent',
+              color: canRedo ? '#334155' : '#cbd5e1',
+              border: 'none',
+              cursor: canRedo ? 'pointer' : 'not-allowed',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontSize: '12px'
+            }}>
+            <Redo2 size={16} />
+          </button>
+        </div>
 
         <div style={{ flex: 1, minWidth: '4px' }} />
 
