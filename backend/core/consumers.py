@@ -164,6 +164,9 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
 
             if "," in data_str:
                 _, b64data = data_str.split(",", 1)
+            else:
+                b64data = data_str
+            if b64data:
                 store.add_audio_chunk(role, client_id, timestamp, b64data)
             return
 

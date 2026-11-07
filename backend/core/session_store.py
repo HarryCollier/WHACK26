@@ -56,6 +56,9 @@ def ensure_ffmpeg_in_path():
     except Exception as e:
         logger.warning(f"Could not configure imageio-ffmpeg: {e}")
 
+# Pre-configure ffmpeg in PATH on module load so load_audio works immediately
+ensure_ffmpeg_in_path()
+
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
@@ -71,10 +74,17 @@ def get_whisper_model():
                     logger.warning(f"Could not configure unverified SSL context: {e}")
 
                 import whisper
-                model_name = os.environ.get("WHISPER_MODEL", "small.en")
-                logger.info(f"Loading Whisper '{model_name}' model for high-accuracy English transcription...")
-                # small.en significantly outperforms base.en in word accuracy, phonetics, and noisy/Bluetooth audio
-                _whisper_model = whisper.load_model(model_name)
+                model_name = os.environ.get("WHISPER_MODEL", "base.en")
+                try:
+                    logger.info(f"Loading Whisper '{model_name}' model...")
+                    _whisper_model = whisper.load_model(model_name)
+                except Exception as err:
+                    logger.warning(f"Could not load Whisper '{model_name}' ({err}). Falling back to 'base.en'...")
+                    try:
+                        _whisper_model = whisper.load_model("base.en")
+                    except Exception as err2:
+                        logger.warning(f"Could not load 'base.en' ({err2}). Falling back to 'tiny'...")
+                        _whisper_model = whisper.load_model("tiny")
     return _whisper_model
 
 @dataclass
@@ -129,7 +139,9 @@ class RoomSessionStore:
     VIDEO_ANALYSIS_STRIDE: int = 3
 
     def start_transcription_worker(self, on_transcript_callback=None):
+        ensure_ffmpeg_in_path()
         def worker():
+            ensure_ffmpeg_in_path()
             while self.is_running:
                 try:
                     item = self.audio_queue.get(timeout=1.0)
@@ -155,10 +167,12 @@ class RoomSessionStore:
                         audio_data = load_audio(tmp_path)
                         
                         # 2. Server-side VAD: Calculate root mean square (energy)
-                        # Ambient background hum is ~0.01-0.025; active speech is >= 0.04
+                        # Ambient background hum is ~0.001-0.003; normal speech is >= 0.006-0.030
                         rms = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) > 0 else 0.0
-                        if rms < 0.04:
-                            # Silence or ambient room noise — skip transcription
+                        logger.info(f"[{self.room_code}] [{role}] Audio chunk: samples={len(audio_data)}, RMS={rms:.4f}")
+                        if rms < 0.005:
+                            # Silence or muted mic — skip transcription
+                            logger.debug(f"[{self.room_code}] [{role}] Audio below silence cutoff (RMS={rms:.4f} < 0.005), skipping")
                             continue
 
                         model = get_whisper_model()
@@ -166,18 +180,26 @@ class RoomSessionStore:
                             continue
 
                         # Pass the pre-loaded numpy audio array directly to Whisper
-                        result = model.transcribe(
-                            audio_data,
-                            fp16=False,
-                            language='en',
-                            temperature=0.0,
-                            beam_size=5,
-                            best_of=5,
-                            compression_ratio_threshold=2.2,
-                            logprob_threshold=-1.0,
-                            no_speech_threshold=0.6,
-                            condition_on_previous_text=False
-                        )
+                        # Use greedy search (beam_size=None) to avoid tensor reshape errors on short/boundary chunks
+                        result = None
+                        try:
+                            result = model.transcribe(
+                                audio_data,
+                                fp16=False,
+                                language='en',
+                                temperature=0.0,
+                                compression_ratio_threshold=2.2,
+                                logprob_threshold=-1.0,
+                                no_speech_threshold=0.6,
+                                condition_on_previous_text=False
+                            )
+                        except Exception as transcribe_err:
+                            logger.warning(f"[{self.room_code}] [{role}] Whisper transcribe warning: {transcribe_err}")
+                            continue
+
+                        if not result:
+                            continue
+
                         raw_text = result.get("text", "").strip()
 
                         # Strip bracketed subtitle artifacts like [Music], (Silence)
@@ -203,19 +225,45 @@ class RoomSessionStore:
                                     text=text
                                 )
                                 self.transcripts.append(entry)
-                                logger.info(f"[{self.room_code}] [{role}] Transcribed: {text}")
+                                logger.info(f"[{self.room_code}] [{role}] Transcribed: '{text}'")
 
                                 # ── Acoustic feature extraction (non-blocking, same thread) ──
                                 try:
                                     from .extractors.audio_features import extract_audio_features
-                                    features = extract_audio_features(b64_audio, whisper_segments=segments)
+                                    features = extract_audio_features(b64_webm=b64_audio, whisper_segments=segments, audio_data=audio_data)
                                     self.audio_features_by_chunk[timestamp] = features
                                     logger.debug(f"[{self.room_code}] [{role}] Audio features: {features.get('confidence_signal')}")
                                 except Exception as af_err:
                                     logger.warning(f"[{self.room_code}] Audio feature extraction failed: {af_err}")
 
+                                # Direct broadcast to room group via channel layer
+                                try:
+                                    from channels.layers import get_channel_layer
+                                    from asgiref.sync import async_to_sync
+                                    layer = get_channel_layer()
+                                    if layer:
+                                        async_to_sync(layer.group_send)(
+                                            f"meeting_{self.room_code}",
+                                            {
+                                                "type": "room_broadcast",
+                                                "sender_channel": "",
+                                                "payload": {
+                                                    "type": "live_transcript",
+                                                    "role": entry.role,
+                                                    "clientId": entry.client_id,
+                                                    "timestamp": entry.timestamp,
+                                                    "text": entry.text
+                                                }
+                                            }
+                                        )
+                                except Exception as broadcast_err:
+                                    logger.debug(f"Direct channel layer transcript broadcast skipped: {broadcast_err}")
+
                                 if on_transcript_callback:
-                                    on_transcript_callback(entry)
+                                    try:
+                                        on_transcript_callback(entry)
+                                    except Exception as cb_err:
+                                        logger.debug(f"on_transcript_callback error: {cb_err}")
                     finally:
                         if os.path.exists(tmp_path):
                             try:

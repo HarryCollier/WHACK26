@@ -65,13 +65,17 @@ class SessionStatsView(APIView):
         room_code = room_code.upper()
         manager = SessionManager.get_instance()
         if room_code not in manager.rooms:
-            return Response({
-                'active': False,
-                'room_code': room_code,
-                'message': 'No active in-memory session for this room code.'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        store = manager.rooms[room_code]
+            # If the room exists in DB, initialize the in-memory store so initial polling doesn't 404
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
         
         # Calculate summary counts without dumping huge base64 strings
         tutor_frames_count = len(store.video_frames.get('tutor', []))
@@ -117,13 +121,17 @@ class TelemetryView(APIView):
         room_code = room_code.upper()
         manager = SessionManager.get_instance()
         if room_code not in manager.rooms:
-            return Response({
-                'active': False,
-                'room_code': room_code,
-                'message': 'No active in-memory session for this room code.'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        store = manager.rooms[room_code]
+            # If the room exists in DB, initialize the in-memory store so initial polling doesn't 404
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
         try:
             payload = build_telemetry_payload(store)
             return Response(payload, status=status.HTTP_200_OK)
@@ -143,13 +151,17 @@ class EngagementPulseView(APIView):
         room_code = room_code.upper()
         manager = SessionManager.get_instance()
         if room_code not in manager.rooms:
-            return Response({
-                'active': False,
-                'room_code': room_code,
-                'message': 'No active in-memory session for this room code.'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        store = manager.rooms[room_code]
+            # If the room exists in DB, initialize the in-memory store so initial polling doesn't 404
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
         try:
             pulse = get_rolling_engagement(store, window_seconds=15)
             return Response(pulse, status=status.HTTP_200_OK)
@@ -168,13 +180,17 @@ class AICoachView(APIView):
         room_code = room_code.upper()
         manager = SessionManager.get_instance()
         if room_code not in manager.rooms:
-            return Response({
-                'active': False,
-                'room_code': room_code,
-                'message': 'No active in-memory session for this room code.'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        store = manager.rooms[room_code]
+            # If the room exists in DB, initialize the in-memory store so initial polling doesn't 404
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
         if store.last_coaching_report:
             return Response(store.last_coaching_report, status=status.HTTP_200_OK)
 
@@ -185,13 +201,17 @@ class AICoachView(APIView):
         room_code = room_code.upper()
         manager = SessionManager.get_instance()
         if room_code not in manager.rooms:
-            return Response({
-                'active': False,
-                'room_code': room_code,
-                'message': 'No active in-memory session for this room code.'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        store = manager.rooms[room_code]
+            # If the room exists in DB, initialize the in-memory store so initial polling doesn't 404
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
         return self._generate(request, store)
 
     def _generate(self, request, store):

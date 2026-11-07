@@ -100,25 +100,27 @@ const StreamDispatcher = ({
       }, config.AUDIO_CHUNK_INTERVAL_MS);
 
       audioRecorder.onstop = () => {
-        const hadSpeech = speechActiveInWindow;
-        speechActiveInWindow = false;
-
-        if (hadSpeech && audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
+        if (audioChunks.length > 0 && socket.readyState === WebSocket.OPEN) {
           const blob = new Blob(audioChunks, { type: mimeType });
           audioChunks = [];
 
-          if (blob.size > 3000) {
+          if (blob.size > 400) {
             const chunkTimestamp = Date.now();
             const reader = new FileReader();
             reader.onloadend = () => {
-              socket.send(JSON.stringify({
-                type: 'audio_chunk',
-                role,
-                clientId,
-                timestamp: chunkTimestamp,
-                format: mimeType,
-                data: reader.result
-              }));
+              try {
+                socket.send(JSON.stringify({
+                  type: 'audio_chunk',
+                  role,
+                  clientId,
+                  timestamp: chunkTimestamp,
+                  format: mimeType,
+                  data: reader.result
+                }));
+                console.log(`[StreamDispatcher] Sent audio chunk (${blob.size} bytes) for ${role}`);
+              } catch (err) {
+                console.warn('[StreamDispatcher] Failed to send audio chunk', err);
+              }
             };
             reader.readAsDataURL(blob);
           }

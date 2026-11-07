@@ -295,7 +295,7 @@ export default function AICoachPanel({ roomCode, socket, role, isOpen, onClose }
                   fontSize: '12px'
                 }}>
                 <option value="auto">Auto (Gemini &gt; OpenAI &gt; Heuristic)</option>
-                <option value="gemini">Google Gemini 2.0 / 1.5 Flash (Recommended - Free Tier)</option>
+                <option value="gemini">Google Gemini (Free Tier on Google AI Studio)</option>
                 <option value="openai">OpenAI GPT-4o-mini</option>
                 <option value="ollama">Ollama (Local Llama 3.1 / Qwen)</option>
                 <option value="heuristic">Heuristic Engine (No API key needed)</option>

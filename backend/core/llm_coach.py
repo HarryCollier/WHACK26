@@ -22,7 +22,7 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 # Default provider configurations (can be overridden via environment variables or Django settings)
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
@@ -67,12 +67,36 @@ You MUST respond ONLY with a valid JSON object matching this exact schema:
 """
 
 
+def _load_env_file():
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", ".env"),
+        os.path.join(os.path.dirname(__file__), "..", "..", ".env"),
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.getcwd(), "backend", ".env")
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+            except Exception:
+                pass
+
+
 def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optional[str] = None, provider_override: Optional[str] = None) -> Dict[str, Any]:
     """
     Main entry point: Generates a coaching report from a telemetry payload.
     Automatically detects configured provider (Gemini, OpenAI, Ollama) or falls back
     to the heuristic data-driven engine.
     """
+    _load_env_file()
     provider = provider_override or os.environ.get("LLM_PROVIDER", "auto").lower()
     gemini_key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
     openai_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -117,39 +141,57 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
 
 
 def _call_gemini(prompt_context: str, api_key: str) -> Dict[str, Any]:
-    model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+    candidate_models = [configured_model]
+    for fallback in ["gemini-3.5-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
 
-    full_prompt = f"{COACH_SYSTEM_PROMPT}\n\nHere is the current live session data:\n\n{prompt_context}"
+    last_err = None
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-    req_data = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": full_prompt}]
+        full_prompt = f"{COACH_SYSTEM_PROMPT}\n\nHere is the current live session data:\n\n{prompt_context}"
+
+        req_data = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": full_prompt}]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.3
             }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.3
         }
-    }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(req_data).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(req_data).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
 
-    with urllib.request.urlopen(req, timeout=12) as response:
-        result = json.loads(response.read().decode("utf-8"))
-        candidates = result.get("candidates", [])
-        if candidates and "content" in candidates[0]:
-            parts = candidates[0]["content"].get("parts", [])
-            if parts and "text" in parts[0]:
-                return _clean_and_parse_json(parts[0]["text"])
+        try:
+            with urllib.request.urlopen(req, timeout=14) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                candidates = result.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    parts = candidates[0]["content"].get("parts", [])
+                    if parts and "text" in parts[0]:
+                        return _clean_and_parse_json(parts[0]["text"])
+        except urllib.error.HTTPError as err:
+            last_err = err
+            logger.warning(f"Gemini model '{model}' failed with status {err.code}. Trying next candidate...")
+            continue
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Gemini model '{model}' encountered error: {e}. Trying next candidate...")
+            continue
 
+    if last_err:
+        raise last_err
     raise ValueError("Empty or invalid response from Gemini API")
 
 

@@ -24,41 +24,54 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def extract_audio_features(b64_webm: str, whisper_segments: Optional[list] = None) -> dict:
+def extract_audio_features(
+    b64_webm: Optional[str] = None, 
+    whisper_segments: Optional[list] = None,
+    audio_data: Optional[np.ndarray] = None,
+    sr: int = 16000
+) -> dict:
     """
     Args:
         b64_webm: Raw base64 audio blob (WebM/Opus format, no data-URL prefix).
         whisper_segments: Optional list of Whisper segment dicts with 'start','end','text'
                           keys – used to compute accurate speaking rate.
+        audio_data: Optional pre-loaded float32 numpy array (e.g. from whisper.load_audio).
+        sr: Sample rate (default 16000).
 
     Returns:
         Dict with acoustic features, or an error dict if extraction fails.
     """
     try:
         import librosa
-        import soundfile as sf
     except ImportError as e:
         logger.error(f"[audio_features] Missing dependency: {e}")
         return {"error": str(e), "confidence_signal": "unknown"}
 
-    # ── Write temp WebM file ─────────────────────────────────────────────────
-    try:
-        audio_bytes = base64.b64decode(b64_webm)
-    except Exception as e:
-        return {"error": f"base64 decode failed: {e}", "confidence_signal": "unknown"}
-
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+        if audio_data is not None and len(audio_data) > 0:
+            y = audio_data.astype(np.float32)
+        elif b64_webm:
+            try:
+                audio_bytes = base64.b64decode(b64_webm)
+            except Exception as e:
+                return {"error": f"base64 decode failed: {e}", "confidence_signal": "unknown"}
 
-        # ── Load via librosa (uses ffmpeg under the hood) ────────────────────
-        try:
-            y, sr = librosa.load(tmp_path, sr=16000, mono=True)
-        except Exception as e:
-            logger.warning(f"[audio_features] librosa.load failed: {e}")
-            return {"error": f"audio load failed: {e}", "confidence_signal": "unknown"}
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            try:
+                from whisper.audio import load_audio
+                y = load_audio(tmp_path, sr=sr)
+            except Exception as w_err:
+                try:
+                    y, sr = librosa.load(tmp_path, sr=sr, mono=True)
+                except Exception as e:
+                    logger.warning(f"[audio_features] audio load failed: {e}")
+                    return {"error": f"audio load failed: {e}", "confidence_signal": "unknown"}
+        else:
+            return {"error": "no audio provided", "confidence_signal": "unknown"}
 
         if len(y) < sr * 0.1:
             # Too short to analyse meaningfully
