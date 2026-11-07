@@ -141,22 +141,23 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
     let isMounted = true;
 
     // 1. Listen for real-time WebSocket engagement pulses
+    const handleMessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'engagement_pulse' && data.data) {
+          if (isMounted) setPulse(data.data);
+        }
+      } catch {}
+    };
+
     if (socket) {
-      const handleMessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === 'engagement_pulse' && data.data) {
-            if (isMounted) setPulse(data.data);
-          }
-        } catch {}
-      };
       socket.addEventListener('message', handleMessage);
-      return () => {
-        socket.removeEventListener('message', handleMessage);
-      };
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'request_engagement_pulse' }));
+      }
     }
 
-    // 2. Rolling fallback poll (every 10s)
+    // 2. Rolling fallback poll (every 2.5s for snappy real-time feedback)
     const fetchPulse = async () => {
       try {
         const res = await fetch(`${getApiBase()}/api/rooms/${roomCode}/engagement/`);
@@ -168,19 +169,28 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
     };
 
     fetchPulse();
-    const interval = setInterval(fetchPulse, 10000);
+    const interval = setInterval(fetchPulse, 2500);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
+      if (socket) {
+        socket.removeEventListener('message', handleMessage);
+      }
     };
   }, [roomCode, socket]);
 
   // Map state to readable written emotion text
   const getWrittenEmotion = () => {
     if (!pulse.student_face_detected || pulse.status_color === 'gray') {
+      if (pulse.has_raw_frames || pulse.status_label === 'No Student Face Detected') {
+        return {
+          title: 'No Face in View',
+          detail: 'Camera active • Looking away'
+        };
+      }
       return {
-        title: 'Camera Inactive',
+        title: 'Connecting Video...',
         detail: 'Waiting for student feed'
       };
     }

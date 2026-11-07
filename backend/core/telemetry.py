@@ -329,6 +329,7 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
             "status_color": "gray",
             "attention_state": "no_face",
             "student_face_detected": False,
+            "has_raw_frames": has_raw_frames,
             "brow_furrow_level": 0.0,
             "gaze_direction": "unknown",
             "actionable_hint": "Check if student camera is enabled and visible.",
@@ -343,13 +344,13 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
     avg_furrow = _safe_mean(furrows) or 0.0
 
     # Count attention states
-    confused_count = sum(1 for f in faces if f.get("attention_state") == "confused_furrow" or f.get("brow_furrow_score", 0) > 0.40)
-    away_count = sum(1 for f in faces if f.get("gaze_direction") not in ("screen", "unknown"))
+    confused_count = sum(1 for f in faces if f.get("attention_state") in ("confused", "confused_furrow") or f.get("brow_furrow_score", 0) > 0.40)
+    away_count = sum(1 for f in faces if f.get("gaze_direction") not in ("screen", "forward", "unknown") and not f.get("eye_contact", True))
 
     pct_confused = confused_count / len(faces)
     pct_away = away_count / len(faces)
 
-    recent_gaze = faces[-1].get("gaze_direction", "screen")
+    recent_gaze = faces[-1].get("gaze_direction", "forward")
 
     # Determine status & badge
     if pct_confused >= 0.35 or avg_furrow > 0.45:
@@ -379,6 +380,7 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         "status_color": status_color,
         "attention_state": attention_state,
         "student_face_detected": True,
+        "has_raw_frames": True,
         "brow_furrow_level": round(avg_furrow, 2),
         "gaze_direction": recent_gaze,
         "actionable_hint": hint,

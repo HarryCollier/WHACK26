@@ -63,6 +63,27 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             }
         )
 
+        # Check for live pedagogical nudge
+        try:
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code)
+            from .llm_coach import generate_live_nudge
+            nudge = generate_live_nudge(store)
+            if nudge:
+                async_to_sync(channel_layer.group_send)(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": "",
+                        "payload": {
+                            "type": "live_coach_toast",
+                            "data": nudge
+                        }
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"Error evaluating live nudge on transcript: {e}")
+
     async def receive_json(self, content):
         """
         Receives messages from client.
@@ -109,6 +130,26 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             })
             return
 
+        if msg_type == "trigger_demo_nudge":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            from .llm_coach import generate_live_nudge
+            trigger_type = content.get("triggerType", "demo_fractions")
+            nudge = generate_live_nudge(store, force_trigger=trigger_type)
+            if nudge:
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": "",
+                        "payload": {
+                            "type": "live_coach_toast",
+                            "data": nudge
+                        }
+                    }
+                )
+            return
+
         if msg_type == "join":
             self.role = content.get("role", "guest")
             self.client_id = content.get("clientId")
@@ -153,6 +194,22 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             role = content.get("role", self.role or "unknown")
             client_id = content.get("clientId", self.client_id or "unknown")
             store.add_video_frame(role, client_id, timestamp, data_url)
+
+            # Whenever student video is processed, push real-time engagement pulse to room
+            if role == "student":
+                from .telemetry import get_rolling_engagement
+                pulse = get_rolling_engagement(store)
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": self.channel_name,
+                        "payload": {
+                            "type": "engagement_pulse",
+                            "data": pulse
+                        }
+                    }
+                )
             return
 
         # 3. Audio chunk processing: Live transcription queued for Whisper

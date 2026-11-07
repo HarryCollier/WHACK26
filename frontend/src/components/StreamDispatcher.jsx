@@ -151,14 +151,17 @@ const StreamDispatcher = ({
   }, [localStream, socket, role, clientId, config.AUDIO_CHUNK_INTERVAL_MS]);
 
   // 2. High-frequency Video Snapshots: Captured every 0.5s (500ms)
-  // Uses ImageCapture API (hardware camera frame) with fallback to DOM mounted video
+  // Uses direct video element rendering with fallback to document video elements and ImageCapture
   useEffect(() => {
     if (!socket || !localStream) return;
 
-    // Attach stream to the mounted hidden DOM video element
+    // Attach stream to the mounted DOM video element
     const video = videoElemRef.current;
     if (video) {
       video.srcObject = localStream;
+      video.onloadedmetadata = () => {
+        video.play().catch(() => {});
+      };
       video.play().catch(() => {});
     }
 
@@ -180,6 +183,7 @@ const StreamDispatcher = ({
     hiddenCanvasRef.current = canvas;
 
     let isCapturing = false;
+    let frameCount = 0;
 
     const captureAndSendFrame = async () => {
       if (isCapturing || socket.readyState !== WebSocket.OPEN) return;
@@ -189,8 +193,26 @@ const StreamDispatcher = ({
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         let drawn = false;
 
-        // Strategy A: Direct hardware camera capture via ImageCapture (cleanest & highest quality)
-        if (imageCaptureRef.current) {
+        // Strategy A: Directly draw from local video element (fast, hardware accelerated)
+        if (video && (video.readyState >= 2 || video.currentTime > 0) && video.videoWidth > 0) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          drawn = true;
+        }
+
+        // Strategy B: Fallback to any active playing video in DOM (e.g. VideoCall preview)
+        if (!drawn) {
+          const domVideos = document.querySelectorAll('video');
+          for (const v of domVideos) {
+            if (v.readyState >= 2 && v.videoWidth > 0 && !v.paused) {
+              ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+              drawn = true;
+              break;
+            }
+          }
+        }
+
+        // Strategy C: Hardware ImageCapture API if available
+        if (!drawn && imageCaptureRef.current) {
           try {
             const bitmap = await imageCaptureRef.current.grabFrame();
             if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
@@ -198,15 +220,7 @@ const StreamDispatcher = ({
               drawn = true;
               if (bitmap.close) bitmap.close();
             }
-          } catch (icErr) {
-            // Fallback to video element below if grabFrame is busy
-          }
-        }
-
-        // Strategy B: Mounted DOM Video element
-        if (!drawn && video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          drawn = true;
+          } catch (icErr) {}
         }
 
         if (!drawn) {
@@ -214,29 +228,8 @@ const StreamDispatcher = ({
           return;
         }
 
-        // Quick brightness verification: verify frame is not solid black (#000000)
-        try {
-          const sample = ctx.getImageData(
-            Math.floor(canvas.width / 2) - 10,
-            Math.floor(canvas.height / 2) - 10,
-            20,
-            20
-          ).data;
-          let hasLight = false;
-          for (let p = 0; p < sample.length; p += 4) {
-            if (sample[p] > 10 || sample[p + 1] > 10 || sample[p + 2] > 10) {
-              hasLight = true;
-              break;
-            }
-          }
-          if (!hasLight) {
-            // Discard black unrendered frame
-            isCapturing = false;
-            return;
-          }
-        } catch (e) {}
-
         const videoDataUrl = canvas.toDataURL('image/jpeg', config.VIDEO_QUALITY);
+        frameCount += 1;
 
         socket.send(JSON.stringify({
           type: 'video_frame',
@@ -245,6 +238,10 @@ const StreamDispatcher = ({
           timestamp: Date.now(),
           dataUrl: videoDataUrl
         }));
+
+        if (frameCount % 10 === 1) {
+          console.log(`[StreamDispatcher] Sent video frame #${frameCount} for ${role}`);
+        }
       } catch (frameErr) {
         console.warn('Frame capture error:', frameErr);
       } finally {
@@ -299,7 +296,7 @@ const StreamDispatcher = ({
         left: 0,
         width: `${config.VIDEO_WIDTH}px`,
         height: `${config.VIDEO_HEIGHT}px`,
-        opacity: 0,
+        opacity: 0.001,
         pointerEvents: 'none',
         zIndex: -9999
       }}

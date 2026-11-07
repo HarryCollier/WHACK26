@@ -5,7 +5,9 @@ import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
 import DiagnosticsModal from './DiagnosticsModal';
 import AICoachPanel from './AICoachPanel';
-import StudentStateWidget from './StudentStateWidget';
+import EndSessionReportModal from './EndSessionReportModal';
+import CoachToast from './CoachToast';
+import CoachNotebook from './CoachNotebook';
 import { getWebSocketUrl } from '../config/apiConfig';
 
 const MeetingRoom = ({ session, onLeave }) => {
@@ -19,6 +21,14 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showAICoach, setShowAICoach] = useState(false);
   const [showDialogue, setShowDialogue] = useState(false);
+  const [showEndReport, setShowEndReport] = useState(false);
+
+  // Live Coach Alert Toasts & Notebook
+  const [activeToast, setActiveToast] = useState(null);
+  const [notebookEntries, setNotebookEntries] = useState([
+    { id: '1', tier: 'T1', category: 'Pacing', text: 'Session active. Audio transcription and visual canvas ready.', timestamp: Date.now(), read: true }
+  ]);
+  const [isNotebookOpen, setIsNotebookOpen] = useState(false);
 
   // Picture-in-Picture window position & collapse state
   const [pipPos, setPipPos] = useState({ x: 16, y: 56 });
@@ -65,6 +75,22 @@ const MeetingRoom = ({ session, onLeave }) => {
               text: data.text,
               timestamp: data.timestamp
             }]);
+          } else if (data.type === 'live_coach_toast' && data.data) {
+            if (role === 'tutor') {
+              setActiveToast(data.data);
+              setNotebookEntries(prev => [
+                ...prev,
+                {
+                  id: `entry_${Date.now()}`,
+                  tier: data.data.tier,
+                  category: data.data.category || 'Confusion',
+                  text: data.data.notebook_entry || data.data.toast_text,
+                  suggestion: data.data.action_label,
+                  timestamp: Date.now(),
+                  read: false
+                }
+              ]);
+            }
           }
         } catch (e) {}
       };
@@ -118,6 +144,54 @@ const MeetingRoom = ({ session, onLeave }) => {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  // Demo Nudge Trigger (hotkey: Ctrl+Shift+D or Alt+D)
+  const triggerDemoNudge = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'trigger_demo_nudge',
+        triggerType: 'demo_fractions'
+      }));
+    } else {
+      const demoToast = {
+        tier: 'T3',
+        category: 'confusion',
+        toast_text: 'Student stuck on dividing fractions — try a pizza-slice example?',
+        action_label: '🍕 Drop on Board',
+        example_type: 'fraction_pizza',
+        notebook_entry: "🔴 Student confused: 'wait, how do we divide fractions?'",
+        timestamp: Date.now()
+      };
+      setActiveToast(demoToast);
+      setNotebookEntries(prev => [...prev, {
+        id: `entry_${Date.now()}`,
+        tier: 'T3',
+        category: 'Confusion',
+        text: demoToast.notebook_entry,
+        suggestion: demoToast.action_label,
+        timestamp: Date.now(),
+        read: false
+      }]);
+    }
+  };
+
+  const handleApplyExample = (exampleType) => {
+    if (whiteboardRef.current?.insertVisualExample) {
+      whiteboardRef.current.insertVisualExample(exampleType || 'fraction_pizza');
+    }
+    setActiveToast(null);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') || (e.altKey && e.key.toLowerCase() === 'd')) {
+        e.preventDefault();
+        triggerDemoNudge();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handlePipPointerDown = (e) => {
     isDraggingPip.current = true;
@@ -205,6 +279,28 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {/* Quick Demo Trigger for 3-minute pitch */}
+          {role === 'tutor' && (
+            <button
+              onClick={triggerDemoNudge}
+              title="Ctrl+Shift+D: Trigger 10s Confusion Demo Nudge"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '6px 12px',
+                borderRadius: '6px',
+                backgroundColor: '#7c2d12',
+                color: '#fed7aa',
+                fontSize: '12px',
+                fontWeight: 600,
+                border: '1px solid #ea580c',
+                cursor: 'pointer'
+              }}>
+              <span>⚡ Demo Nudge</span>
+            </button>
+          )}
+
           {/* AI Coach Button for Tutor */}
           {role === 'tutor' && (
             <button
@@ -279,7 +375,13 @@ const MeetingRoom = ({ session, onLeave }) => {
           </span>
 
           <button
-            onClick={onLeave}
+            onClick={() => {
+              if (role === 'tutor') {
+                setShowEndReport(true);
+              } else {
+                onLeave();
+              }
+            }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -289,7 +391,8 @@ const MeetingRoom = ({ session, onLeave }) => {
               backgroundColor: '#334155',
               color: '#f8fafc',
               fontSize: '13px',
-              fontWeight: 500
+              fontWeight: 500,
+              cursor: 'pointer'
             }}>
             <LogOut size={16} />
             Exit Session
@@ -378,12 +481,30 @@ const MeetingRoom = ({ session, onLeave }) => {
           </div>
         </div>
 
-        {/* Top-Right: Tutor Student State Widget (Tutor only, right side clear for student) */}
+        {/* Tiered Live Alert Toast (~1/8th of canvas height, tutor only) */}
+        {role === 'tutor' && activeToast && (
+          <CoachToast
+            toast={activeToast}
+            onApplyExample={handleApplyExample}
+            onDismiss={() => setActiveToast(null)}
+            onSnooze={() => setActiveToast(null)}
+          />
+        )}
+
+        {/* Coach Notebook: Collapsible tab & drawer on the right edge */}
         {role === 'tutor' && (
-          <StudentStateWidget
-            roomCode={roomCode}
-            socket={socket}
-            onOpenReport={() => setShowAICoach(true)}
+          <CoachNotebook
+            isOpen={isNotebookOpen}
+            onToggle={() => setIsNotebookOpen(prev => !prev)}
+            entries={notebookEntries}
+            topTakeaways={[
+              'Fractions division: Favor visual representations (pizza, number line).',
+              'Student recovers quickly when given a concrete example first.'
+            ]}
+            onOpenFullReport={() => {
+              setIsNotebookOpen(false);
+              setShowAICoach(true);
+            }}
           />
         )}
 
@@ -391,7 +512,7 @@ const MeetingRoom = ({ session, onLeave }) => {
         {transcripts.length > 0 && (
           <div style={{
             position: 'absolute',
-            bottom: '24px',
+            bottom: activeToast ? '106px' : '24px',
             left: '50%',
             transform: 'translateX(-50%)',
             maxWidth: '80%',
@@ -400,7 +521,8 @@ const MeetingRoom = ({ session, onLeave }) => {
             display: 'flex',
             flexDirection: 'column',
             gap: '6px',
-            alignItems: 'center'
+            alignItems: 'center',
+            transition: 'bottom 0.2s ease'
           }}>
             {transcripts.slice(-2).map((t, idx) => {
               const isTutor = t.role === 'tutor';
@@ -464,6 +586,18 @@ const MeetingRoom = ({ session, onLeave }) => {
         isOpen={showAICoach}
         onClose={() => setShowAICoach(false)}
       />
+
+      {/* Comprehensive End-of-Session Report Modal for Tutor */}
+      {role === 'tutor' && (
+        <EndSessionReportModal
+          isOpen={showEndReport}
+          onClose={() => setShowEndReport(false)}
+          onConfirmExit={onLeave}
+          roomCode={roomCode}
+          title={title}
+          transcripts={transcripts}
+        />
+      )}
 
       {/* Live Dialogue & Full Transcript Drawer */}
       {showDialogue && (

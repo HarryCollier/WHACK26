@@ -392,3 +392,89 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
         "whiteboard_feedback": wb_feedback,
         "actionable_tips": actionable_tips
     }
+
+
+def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Decides whether the tutor needs a live nudge (T2 glanceable toast or T3 persistent alert).
+    Strictly follows:
+    - Interrupt as rarely as possible (rate-limited, min 90s between live nudges in real-time).
+    - Favor concrete actionable examples (e.g. pizza slice, number line).
+    - If force_trigger is set (e.g. 'demo_fractions' from demo hotkey), bypasses rate-limiter.
+    """
+    now = int(time.time() * 1000)
+
+    # 1. Deterministic / Demo Trigger (100% reproducible for 3-minute hackathon pitch)
+    if force_trigger in ("demo_fractions", "demo", "seed"):
+        store.last_nudge_timestamp = now
+        return {
+            "tier": "T3",
+            "category": "confusion",
+            "confidence": "high",
+            "toast_text": "Student stuck on dividing fractions — try a pizza-slice example?",
+            "action_label": "🍕 Drop on Board",
+            "example_type": "fraction_pizza",
+            "notebook_entry": "🔴 Student confused: 'wait, how do we divide fractions?'",
+            "reasoning": "Student expressed doubt about dividing fractions; visual fraction model recommended."
+        }
+
+    # 2. Rate Limiting: at most 1 live toast per 90 seconds in live session
+    last_nudge = getattr(store, "last_nudge_timestamp", 0)
+    if (now - last_nudge) < 90000:
+        return None
+
+    # 3. Check recent student transcripts (last 45 seconds)
+    student_transcripts = [t for t in store.transcripts if t.role == "student"]
+    if not student_transcripts:
+        return None
+
+    recent_student = student_transcripts[-3:]
+    recent_text = " ".join(t.text.lower() for t in recent_student)
+
+    # Keywords indicating confusion
+    confusion_cues = ["don't get", "don't understand", "wait what", "why did you", "huh?", "confused", "stuck", "lost"]
+    has_confusion = any(cue in recent_text for cue in confusion_cues)
+
+    if has_confusion:
+        store.last_nudge_timestamp = now
+        # Detect topic if mentioned
+        if "fraction" in recent_text or "divide" in recent_text:
+            return {
+                "tier": "T3",
+                "category": "confusion",
+                "confidence": "high",
+                "toast_text": "Student stuck on dividing fractions — try a pizza-slice example?",
+                "action_label": "🍕 Drop on Board",
+                "example_type": "fraction_pizza",
+                "notebook_entry": f"🔴 Confusion: \"{recent_student[-1].text}\"",
+                "reasoning": "Student verbalized confusion; visual pizza model recommended."
+            }
+        else:
+            return {
+                "tier": "T3",
+                "category": "confusion",
+                "confidence": "high",
+                "toast_text": "Student expresses confusion — draw a number line visual?",
+                "action_label": "📏 Drop on Board",
+                "example_type": "number_line",
+                "notebook_entry": f"🔴 Confusion: \"{recent_student[-1].text}\"",
+                "reasoning": "Student verbalized confusion; number line recommended."
+            }
+
+    # 4. Check for sustained silence after a tutor question (pacing T2 toast)
+    if len(store.transcripts) >= 2:
+        last_t = store.transcripts[-1]
+        if last_t.role == "tutor" and "?" in last_t.text and (now - last_t.timestamp) > 15000:
+            store.last_nudge_timestamp = now
+            return {
+                "tier": "T2",
+                "category": "pacing",
+                "confidence": "high",
+                "toast_text": "Quiet spell — check in with an open-ended hint?",
+                "action_label": "📏 Drop on Board",
+                "example_type": "number_line",
+                "notebook_entry": "🟡 Pacing: student silent >15s after tutor question",
+                "reasoning": "Extended silence detected; suggested prompt check-in."
+            }
+
+    return None

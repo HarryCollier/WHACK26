@@ -265,6 +265,111 @@ const Whiteboard = forwardRef(({ onStroke, socket }, ref) => {
     },
     clearBoard: () => {
       handleClear(true);
+    },
+    insertVisualExample: (exampleType = 'fraction_pizza') => {
+      const canvas = canvasRef.current;
+      const rect = canvas ? canvas.getBoundingClientRect() : { width: 800, height: 600 };
+      const cx = Math.round((-pan.x + rect.width / 2) / zoom);
+      const cy = Math.round((-pan.y + rect.height / 2) / zoom);
+
+      const newElements = [];
+      const now = Date.now();
+
+      if (exampleType === 'number_line') {
+        const lineY = cy;
+        newElements.push({
+          id: `nl_main_${now}`,
+          type: 'shape',
+          shapeType: 'arrow',
+          start: { x: cx - 180, y: lineY },
+          end: { x: cx + 180, y: lineY },
+          color: '#2563eb',
+          size: 3
+        });
+        [-150, -75, 0, 75, 150].forEach((dx, i) => {
+          const labels = ['0', '1/4', '1/2', '3/4', '1'];
+          newElements.push({
+            id: `nl_tick_${i}_${now}`,
+            type: 'shape',
+            shapeType: 'line',
+            start: { x: cx + dx, y: lineY - 12 },
+            end: { x: cx + dx, y: lineY + 12 },
+            color: '#1e293b',
+            size: 2
+          });
+          newElements.push({
+            id: `nl_lbl_${i}_${now}`,
+            type: 'text',
+            text: labels[i],
+            x: cx + dx - 10,
+            y: lineY + 30
+          });
+        });
+        newElements.push({
+          id: `nl_title_${now}`,
+          type: 'text',
+          text: '📏 Number Line: 2 jumps of 1/4 reach 1/2',
+          x: cx - 160,
+          y: lineY - 40
+        });
+      } else {
+        // Default: 🍕 Pizza Fraction Slices Model
+        newElements.push({
+          id: `pizza_crust_${now}`,
+          type: 'shape',
+          shapeType: 'circle',
+          start: { x: cx - 85, y: cy - 85 },
+          end: { x: cx + 85, y: cy + 85 },
+          color: '#d97706',
+          size: 4
+        });
+        newElements.push({
+          id: `pizza_vsplit_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx, y: cy - 85 },
+          end: { x: cx, y: cy + 85 },
+          color: '#b45309',
+          size: 2.5
+        });
+        newElements.push({
+          id: `pizza_hsplit_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx - 85, y: cy },
+          end: { x: cx + 85, y: cy },
+          color: '#b45309',
+          size: 2.5
+        });
+        newElements.push({
+          id: `pizza_title_${now}`,
+          type: 'text',
+          text: '🍕 Fraction Model: 1/2 ÷ 1/4 = 2',
+          x: cx - 130,
+          y: cy - 105
+        });
+        newElements.push({
+          id: `pizza_expl_${now}`,
+          type: 'text',
+          text: '"How many 1/4 slices fit in 1/2 pizza? -> 2 slices!"',
+          x: cx - 170,
+          y: cy + 120
+        });
+      }
+
+      for (const el of newElements) {
+        elementsRef.current.push(el);
+        undoStackRef.current.push({ type: 'add', element: el });
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'whiteboard_element',
+            element: el
+          }));
+        }
+      }
+
+      updateHistoryState();
+      redrawAll();
     }
   }));
 

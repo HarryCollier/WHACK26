@@ -326,7 +326,7 @@ class RoomSessionStore:
                 features = extract_video_features(data_url)
                 features["timestamp_ms"] = timestamp
                 self.video_frame_features[role].append(features)
-                logger.debug(f"[{self.room_code}] [{role}] Video features: {features.get('engagement_label')} gaze={features.get('gaze_direction')}")
+                logger.info(f"[{self.room_code}] [{role}] Video features: face={features.get('face_detected')} label={features.get('engagement_label')} gaze={features.get('gaze_direction')}")
             except Exception as e:
                 logger.warning(f"[{self.room_code}] Video feature extraction failed: {e}")
 
