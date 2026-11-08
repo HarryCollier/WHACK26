@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import logging
+import asyncio
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from asgiref.sync import async_to_sync
 from .session_store import SessionManager
@@ -9,6 +10,70 @@ from .session_store import SessionManager
 logger = logging.getLogger(__name__)
 
 class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._eval_task = None
+
+    def schedule_student_evaluation(self, store):
+        """Debounces 2.0s after student finishes writing/drawing, then automatically runs multimodal AI analysis in background"""
+        if self._eval_task and not self._eval_task.done():
+            self._eval_task.cancel()
+        self._eval_task = asyncio.create_task(self._debounce_and_evaluate(store))
+
+    async def _debounce_and_evaluate(self, store):
+        try:
+            # Wait 1.8s of inactivity after whiteboard contribution
+            await asyncio.sleep(1.8)
+
+            if getattr(store, "_eval_in_progress", False):
+                return
+            store._eval_in_progress = True
+
+            from .telemetry import build_telemetry_payload
+            from .llm_coach import generate_coaching_report, generate_live_nudge
+
+            payload = await asyncio.to_thread(build_telemetry_payload, store)
+            wb_telem = payload.get("whiteboard_telemetry", {})
+            # Analyze if we have a visual snapshot or whiteboard elements log
+            if wb_telem.get("has_current") or len(getattr(store, "whiteboard_elements_log", [])) > 0:
+                api_key = getattr(store, "llm_api_key", None)
+                provider = getattr(store, "llm_provider", None)
+                report = await asyncio.to_thread(generate_coaching_report, payload, api_key=api_key, provider_override=provider)
+                store.add_coaching_report(report)
+
+                # Broadcast fresh coaching report to all peers (so AI Coach panel updates automatically!)
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": "",
+                        "payload": {
+                            "type": "coaching_report_updated",
+                            "data": report
+                        }
+                    }
+                )
+
+                # Immediately evaluate whether fresh report findings warrant a live coach toast
+                nudge = generate_live_nudge(store)
+                if nudge:
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {
+                            "type": "room_broadcast",
+                            "sender_channel": "",
+                            "payload": {
+                                "type": "live_coach_toast",
+                                "data": nudge
+                            }
+                        }
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Background whiteboard evaluation error: {e}")
+        finally:
+            store._eval_in_progress = False
     async def connect(self):
         self.room_code = self.scope["url_route"]["kwargs"]["room_code"]
         self.room_group_name = f"meeting_{self.room_code}"
@@ -159,7 +224,22 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
             store.active_peers.add(self.client_id)
 
+            api_key = content.get("apiKey")
+            provider = content.get("provider")
+            if api_key:
+                store.llm_api_key = api_key
+            if provider and provider != "auto":
+                store.llm_provider = provider
+
             logger.info(f"User joined room {self.room_code} as {self.role} (ID: {self.client_id})")
+
+            # Instantly synchronize any existing whiteboard drawings/elements made before this user joined!
+            active_elements = list(store.active_whiteboard_elements.values())
+            if active_elements:
+                await self.send_json({
+                    "type": "whiteboard_sync_full",
+                    "elements": active_elements
+                })
             
             await self.channel_layer.group_send(
                 self.room_group_name,
@@ -173,6 +253,28 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             )
             return
 
+        if msg_type == "set_llm_config":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            api_key = content.get("apiKey")
+            provider = content.get("provider")
+            if api_key:
+                store.llm_api_key = api_key
+            if provider and provider != "auto":
+                store.llm_provider = provider
+            logger.info(f"Updated LLM credentials for room {self.room_code}: provider={store.llm_provider}")
+            return
+
+        if msg_type == "request_whiteboard_sync":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            active_elements = list(store.active_whiteboard_elements.values())
+            await self.send_json({
+                "type": "whiteboard_sync_full",
+                "elements": active_elements
+            })
+            return
+
         manager = SessionManager.get_instance()
         store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
 
@@ -183,7 +285,9 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             data_url = content.get("dataUrl", "")
             timestamp = content.get("timestamp", 0)
             role = content.get("role") or self.role or "unknown"
-            store.update_whiteboard(data_url, timestamp, role)
+            has_changed = store.update_whiteboard(data_url, timestamp, role)
+            if has_changed:
+                self.schedule_student_evaluation(store)
             return
 
         if msg_type == "whiteboard_element":
@@ -191,6 +295,26 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             role = content.get("role") or element.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or element.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(element, role, client_id, action="create")
+            try:
+                from .llm_coach import generate_live_nudge
+                wb_nudge = generate_live_nudge(store)
+                if wb_nudge:
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {
+                            "type": "room_broadcast",
+                            "sender_channel": "",
+                            "payload": {
+                                "type": "live_coach_toast",
+                                "data": wb_nudge
+                            }
+                        }
+                    )
+            except Exception as wb_err:
+                logger.debug(f"Whiteboard nudge check error: {wb_err}")
+
+            # Automatically trigger background multimodal AI analysis after drawing pause
+            self.schedule_student_evaluation(store)
             # Fall-through to broadcast element to other peers in room
 
         if msg_type == "whiteboard_stroke":
@@ -198,12 +322,39 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             role = content.get("role") or stroke.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or stroke.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(stroke, role, client_id, action="create")
+            try:
+                from .llm_coach import generate_live_nudge
+                wb_nudge = generate_live_nudge(store)
+                if wb_nudge:
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {
+                            "type": "room_broadcast",
+                            "sender_channel": "",
+                            "payload": {
+                                "type": "live_coach_toast",
+                                "data": wb_nudge
+                            }
+                        }
+                    )
+            except Exception as wb_err:
+                logger.debug(f"Whiteboard stroke nudge check error: {wb_err}")
+
+            self.schedule_student_evaluation(store)
             # Fall-through to broadcast stroke to other peers in room
 
         if msg_type in ("whiteboard_delete_element", "whiteboard_delete_elements"):
             role = content.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(content, role, client_id, action="delete")
+            self.schedule_student_evaluation(store)
+            # Fall-through to broadcast to other peers in room
+
+        if msg_type == "whiteboard_clear":
+            role = content.get("role") or self.role or "unknown"
+            client_id = content.get("clientId") or self.client_id or "unknown"
+            store.record_whiteboard_element({}, role, client_id, action="clear")
+            self.schedule_student_evaluation(store)
             # Fall-through to broadcast to other peers in room
 
         # 2. Frequent timestamped Video snapshots (every 0.5s)
@@ -215,21 +366,40 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId", self.client_id or "unknown")
             store.add_video_frame(role, client_id, timestamp, data_url)
 
-            # Whenever student video is processed, push real-time engagement pulse to room
-            if role == "student":
+            # Whenever video is processed, push real-time engagement pulse to room
+            if role in ("student", "tutor"):
                 from .telemetry import get_rolling_engagement
                 pulse = get_rolling_engagement(store)
                 await self.channel_layer.group_send(
                     self.room_group_name,
                     {
                         "type": "room_broadcast",
-                        "sender_channel": self.channel_name,
+                        "sender_channel": "",
                         "payload": {
                             "type": "engagement_pulse",
                             "data": pulse
                         }
                     }
                 )
+
+                # Check for live coach alerts triggered by video (rolling confusion while tutor is writing/explaining, looking away)
+                try:
+                    from .llm_coach import generate_live_nudge
+                    video_nudge = generate_live_nudge(store)
+                    if video_nudge:
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                "type": "room_broadcast",
+                                "sender_channel": "",
+                                "payload": {
+                                    "type": "live_coach_toast",
+                                    "data": video_nudge
+                                }
+                            }
+                        )
+                except Exception as vn_err:
+                    logger.debug(f"Video live nudge check error: {vn_err}")
             return
 
         # 3. Audio chunk processing: Live transcription queued for Whisper

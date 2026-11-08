@@ -119,12 +119,30 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [lastAutoUpdate, setLastAutoUpdate] = useState(null);
 
   // Settings
   const [showSettings, setShowSettings] = useState(false);
   const [provider, setProvider] = useState(localStorage.getItem('whack_llm_provider') || 'auto');
   const [apiKey, setApiKey] = useState(localStorage.getItem('whack_llm_key') || '');
   const [keySaved, setKeySaved] = useState(false);
+
+  // Listen for real-time background whiteboard evaluations broadcasted from server
+  useEffect(() => {
+    if (!socket) return;
+    const handleWsMessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'coaching_report_updated' && data.data) {
+          setReport(data.data);
+          setLoading(false);
+          setLastAutoUpdate(new Date());
+        }
+      } catch {}
+    };
+    socket.addEventListener('message', handleWsMessage);
+    return () => socket.removeEventListener('message', handleWsMessage);
+  }, [socket]);
 
   // Fetch or trigger report
   const fetchReport = async (forceGenerate = false) => {
@@ -182,6 +200,13 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
     localStorage.setItem('whack_llm_key', apiKey.trim());
     setKeySaved(true);
     setTimeout(() => setKeySaved(false), 2000);
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: 'set_llm_config',
+        apiKey: apiKey.trim() || undefined,
+        provider: provider !== 'auto' ? provider : undefined
+      }));
+    }
     fetchReport(true);
   };
 
@@ -361,11 +386,17 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
       {/* Main Drawer Body */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
         
-        {/* Action Bar (Refresh button, Provider badge) */}
+        {/* Action Bar (Refresh button, Provider badge, Live auto-update status) */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#94a3b8' }}>
-            <Sparkles size={13} color="#a855f7" />
-            <span>Engine: <strong>{report?.provider_used || 'Heuristic / Auto'}</strong></span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#94a3b8' }}>
+              <Sparkles size={13} color="#a855f7" />
+              <span>Engine: <strong>{report?.provider_used || 'Heuristic / Auto'}</strong></span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '10px', color: '#6ee7b7' }}>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#10b981', display: 'inline-block', boxShadow: '0 0 6px #10b981' }} />
+              <span>Auto-analyzing board in background {lastAutoUpdate ? `(${lastAutoUpdate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})` : ''}</span>
+            </div>
           </div>
 
           <button
@@ -386,7 +417,7 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
               opacity: loading ? 0.6 : 1
             }}>
             <RefreshCw size={13} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
-            <span>{loading ? 'Analyzing...' : 'Generate New Report'}</span>
+            <span>{loading ? 'Analyzing...' : 'Reload Report'}</span>
           </button>
         </div>
 

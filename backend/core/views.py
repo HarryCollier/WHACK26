@@ -232,10 +232,55 @@ class AICoachView(APIView):
             api_key = request.GET.get('apiKey')
             provider = request.GET.get('provider')
 
+        # Persist LLM credentials in store for background evaluations
+        if api_key:
+            store.llm_api_key = api_key
+        if provider and provider != 'auto':
+            store.llm_provider = provider
+
         try:
             payload = build_telemetry_payload(store)
-            report = generate_coaching_report(payload, api_key=api_key, provider_override=provider)
+            effective_key = api_key or getattr(store, "llm_api_key", None)
+            effective_provider = provider or getattr(store, "llm_provider", None)
+            report = generate_coaching_report(payload, api_key=effective_key, provider_override=effective_provider)
             store.add_coaching_report(report)
+
+            # Broadcast fresh coaching report to all connected peers in the room
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            layer = get_channel_layer()
+            if layer:
+                async_to_sync(layer.group_send)(
+                    f"meeting_{store.room_code}",
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": "",
+                        "payload": {
+                            "type": "coaching_report_updated",
+                            "data": report
+                        }
+                    }
+                )
+
+            # Immediately check if the fresh report warrants a live coaching toast
+            try:
+                from .llm_coach import generate_live_nudge
+                nudge = generate_live_nudge(store)
+                if nudge and layer:
+                    async_to_sync(layer.group_send)(
+                        f"meeting_{store.room_code}",
+                        {
+                            "type": "room_broadcast",
+                            "sender_channel": "",
+                            "payload": {
+                                "type": "live_coach_toast",
+                                "data": nudge
+                            }
+                        }
+                    )
+            except Exception as nudge_err:
+                logger.debug(f"Live nudge check error in AICoachView: {nudge_err}")
+
             return Response(report, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"Error in AICoachView: {e}")

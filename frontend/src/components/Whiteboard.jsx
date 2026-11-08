@@ -129,7 +129,7 @@ function isPointInPolygon(px, py, polygon) {
   return inside;
 }
 
-const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = '' }, ref) => {
+const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = '', onWhiteboardChange }, ref) => {
   const canvasRef = useRef(null);
   const isDrawing = useRef(false);
 
@@ -142,11 +142,19 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
   // Zoom and Pan (World Camera)
   const [zoom, setZoom] = useState(1.0);
+  const zoomRef = useRef(1.0);
+  zoomRef.current = zoom;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panRef = useRef({ x: 0, y: 0 });
   panRef.current = pan;
   const isPanning = useRef(false);
   const panStart = useRef({ x: 0, y: 0 });
+
+  // Reliable Ref bindings for WebSockets and Undo/Redo (eliminates stale closures)
+  const socketRef = useRef(socket);
+  socketRef.current = socket;
+  const handleUndoRef = useRef(null);
+  const handleRedoRef = useRef(null);
 
   // Multi-touch 2-finger navigation tracking
   const activeTouches = useRef(new Map());
@@ -214,6 +222,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     undoStackRef.current.push(action);
     redoStackRef.current = []; // Clear redo stack on new user action
     updateHistoryState();
+    triggerSnapshotDispatch();
   };
 
   // Live shape and lasso preview state (screen coordinates)
@@ -222,84 +231,175 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
   // Convert Screen coordinates -> World coordinates
   const toWorld = (screenX, screenY) => {
+    const curPan = panRef.current || pan;
+    const curZoom = zoomRef.current || zoom;
     return {
-      x: (screenX - pan.x) / zoom,
-      y: (screenY - pan.y) / zoom
+      x: (screenX - curPan.x) / curZoom,
+      y: (screenY - curPan.y) / curZoom
     };
   };
 
   // Convert World coordinates -> Screen coordinates
   const toScreen = (worldX, worldY) => {
+    const curPan = panRef.current || pan;
+    const curZoom = zoomRef.current || zoom;
     return {
-      x: worldX * zoom + pan.x,
-      y: worldY * zoom + pan.y
+      x: worldX * curZoom + curPan.x,
+      y: worldY * curZoom + curPan.y
     };
+  };
+
+  // Capture high-resolution auto-framed whiteboard snapshot for AI analysis
+  const captureSnapshot = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width > 0 ? rect.width : 960;
+    const h = rect.height > 0 ? rect.height : 600;
+
+    // Reserve 28px at the top for the AI visual legend header
+    const headerH = 28;
+    const targetW = 860;
+    const targetContentH = 500;
+    const targetH = targetContentH + headerH;
+
+    const offscreen = document.createElement('canvas');
+    offscreen.width = targetW;
+    offscreen.height = targetH;
+    const offCtx = offscreen.getContext('2d');
+    if (!offCtx) return null;
+
+    // Solid background
+    offCtx.fillStyle = BOARD_BG_COLOR;
+    offCtx.fillRect(0, 0, targetW, targetH);
+
+    // Draw explicit AI role legend header
+    if (offCtx.save) offCtx.save();
+    if (offCtx.fillRect) {
+      offCtx.fillStyle = '#ffffff';
+      offCtx.fillRect(0, 0, targetW, headerH);
+    }
+    offCtx.strokeStyle = '#cbd5e1';
+    offCtx.lineWidth = 1;
+    if (offCtx.strokeRect) offCtx.strokeRect(0, 0, targetW, headerH);
+
+    // Tutor legend badge (Black / Slate)
+    if (offCtx.fillRect) {
+      offCtx.fillStyle = '#0f172a';
+      offCtx.fillRect(10, 7, 14, 14);
+    }
+    offCtx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+    offCtx.fillStyle = '#0f172a';
+    if (offCtx.fillText) offCtx.fillText('TUTOR (Questions/Prompts)', 28, 18);
+
+    // Student legend badge (Emerald Green)
+    if (offCtx.fillRect) {
+      offCtx.fillStyle = '#059669';
+      offCtx.fillRect(220, 7, 14, 14);
+    }
+    offCtx.fillStyle = '#059669';
+    if (offCtx.fillText) offCtx.fillText('PUPIL (Answers/Work)', 238, 18);
+
+    // Active Work indicator
+    offCtx.fillStyle = '#64748b';
+    offCtx.font = '10px system-ui, -apple-system, sans-serif';
+    if (offCtx.fillText) offCtx.fillText('Active Focus: Recent Work', targetW - 160, 18);
+    if (offCtx.restore) offCtx.restore();
+
+    // Compute bounding box of active / recent elements (latest 15 elements or viewport)
+    const elements = elementsRef.current;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    const recentElements = elements.length > 0 ? elements.slice(-15) : [];
+    for (const el of recentElements) {
+      if (el.points && el.points.length > 0) {
+        for (const pt of el.points) {
+          if (pt.x < minX) minX = pt.x;
+          if (pt.x > maxX) maxX = pt.x;
+          if (pt.y < minY) minY = pt.y;
+          if (pt.y > maxY) maxY = pt.y;
+        }
+      } else if (el.start && el.end) {
+        minX = Math.min(minX, el.start.x, el.end.x);
+        maxX = Math.max(maxX, el.start.x, el.end.x);
+        minY = Math.min(minY, el.start.y, el.end.y);
+        maxY = Math.max(maxY, el.start.y, el.end.y);
+      } else if (el.x !== undefined && el.y !== undefined) {
+        minX = Math.min(minX, el.x);
+        maxX = Math.max(maxX, el.x + 120);
+        minY = Math.min(minY, el.y);
+        maxY = Math.max(maxY, el.y + 40);
+      }
+    }
+
+    const curPan = panRef.current || pan;
+    const curZoom = zoomRef.current || zoom;
+    const vpMinX = -curPan.x / curZoom;
+    const vpMinY = -curPan.y / curZoom;
+    const vpMaxX = vpMinX + w / curZoom;
+    const vpMaxY = vpMinY + h / curZoom;
+
+    let cx, cy, spanW, spanH;
+    if (isFinite(minX) && isFinite(maxX) && isFinite(minY) && isFinite(maxY)) {
+      cx = (minX + maxX) / 2;
+      cy = (minY + maxY) / 2;
+      spanW = Math.max(maxX - minX + 120, 520);
+      spanH = Math.max(maxY - minY + 100, 340);
+    } else {
+      cx = (vpMinX + vpMaxX) / 2;
+      cy = (vpMinY + vpMaxY) / 2;
+      spanW = Math.max(w / curZoom, 520);
+      spanH = Math.max(h / curZoom, 340);
+    }
+
+    const fitScale = Math.min(
+      (targetW - 40) / spanW,
+      (targetContentH - 40) / spanH,
+      1.5
+    );
+
+    // Translate below the legend header, center at (cx, cy) in world space, and scale
+    if (offCtx.save) offCtx.save();
+    if (offCtx.translate) offCtx.translate(targetW / 2, headerH + targetContentH / 2);
+    if (offCtx.scale) offCtx.scale(fitScale, fitScale);
+    if (offCtx.translate) offCtx.translate(-cx, -cy);
+
+    // Render all vector elements cleanly with role color coding
+    for (const el of elementsRef.current) {
+      const isStudent = el.role === 'student';
+      const roleColor = isStudent ? '#059669' : '#0f172a';
+      renderElementToCtx(offCtx, el, roleColor);
+    }
+    if (offCtx.restore) offCtx.restore();
+
+    return offscreen.toDataURL('image/jpeg', 0.8);
+  };
+
+  // Debounced snapshot sender & change notification to automatically trigger background AI analysis
+  const notifySnapshotChange = useRef(null);
+  const triggerSnapshotDispatch = () => {
+    if (notifySnapshotChange.current) clearTimeout(notifySnapshotChange.current);
+    notifySnapshotChange.current = setTimeout(() => {
+      const snap = captureSnapshot();
+      if (snap && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_snapshot',
+          role,
+          clientId,
+          timestamp: Date.now(),
+          dataUrl: snap
+        }));
+      }
+    }, 600);
+    if (onWhiteboardChange) {
+      try { onWhiteboardChange(); } catch {}
+    }
   };
 
   // Expose snapshot extraction handle to parent (for AI telemetry)
   useImperativeHandle(ref, () => ({
-    getSnapshot: () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return null;
-
-      const rect = canvas.getBoundingClientRect();
-      const w = rect.width > 0 ? rect.width : 960;
-      const h = rect.height > 0 ? rect.height : 600;
-
-      // Reserve 28px at the top for the AI visual legend header
-      const headerH = 28;
-      const scale = Math.min(1.0, 960 / w, 580 / h);
-      const targetW = Math.max(380, Math.round(w * scale));
-      const targetH = Math.max(260, Math.round(h * scale) + headerH);
-
-      const offscreen = document.createElement('canvas');
-      offscreen.width = targetW;
-      offscreen.height = targetH;
-      const offCtx = offscreen.getContext('2d');
-      if (!offCtx) return null;
-
-      // Solid background
-      offCtx.fillStyle = BOARD_BG_COLOR;
-      offCtx.fillRect(0, 0, targetW, targetH);
-
-      // Draw explicit AI role legend header
-      offCtx.save();
-      offCtx.fillStyle = '#ffffff';
-      offCtx.fillRect(0, 0, targetW, headerH);
-      offCtx.strokeStyle = '#cbd5e1';
-      offCtx.lineWidth = 1;
-      offCtx.strokeRect(0, 0, targetW, headerH);
-
-      // Tutor legend badge (Black / Slate)
-      offCtx.fillStyle = '#0f172a';
-      offCtx.fillRect(10, 7, 14, 14);
-      offCtx.font = 'bold 11px system-ui, -apple-system, sans-serif';
-      offCtx.fillStyle = '#0f172a';
-      offCtx.fillText('TUTOR (Questions/Prompts)', 28, 18);
-
-      // Student legend badge (Emerald Green)
-      offCtx.fillStyle = '#059669';
-      offCtx.fillRect(220, 7, 14, 14);
-      offCtx.fillStyle = '#059669';
-      offCtx.fillText('PUPIL (Answers/Work)', 238, 18);
-      offCtx.restore();
-
-      // Translate below the legend header & scale to world coordinates
-      offCtx.save();
-      offCtx.translate(0, headerH);
-      offCtx.scale(scale, scale);
-
-      // Render all vector elements cleanly in world coordinates with role color coding
-      for (const el of elementsRef.current) {
-        // Color-code: Tutor = #0f172a (Black/Slate), Student = #059669 (Emerald Green)
-        const isStudent = el.role === 'student';
-        const roleColor = isStudent ? '#059669' : '#0f172a';
-        renderElementToCtx(offCtx, el, roleColor);
-      }
-      offCtx.restore();
-
-      return offscreen.toDataURL('image/jpeg', 0.8);
-    },
+    getSnapshot: captureSnapshot,
     clearBoard: () => {
       handleClear(true);
     },
@@ -312,7 +412,426 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       const newElements = [];
       const now = Date.now();
 
-      if (exampleType === 'number_line') {
+      // Support dynamic custom diagram payload or string key
+      const isCustomDiagram = typeof exampleType === 'object' && exampleType !== null;
+      const diagramKind = isCustomDiagram ? (exampleType.kind || exampleType.type) : exampleType;
+      const params = isCustomDiagram ? (exampleType.params || {}) : {};
+
+      if (diagramKind === 'stepping_stone_text' || (isCustomDiagram && exampleType.type === 'stepping_stone_text')) {
+        const stoneText = exampleType.text || exampleType.stepping_stone || 'Try: 20 - 1 = ?';
+        // Note Card Container
+        newElements.push({
+          id: `stone_bg_${now}`,
+          type: 'shape',
+          shapeType: 'rectangle',
+          start: { x: cx - 180, y: cy - 50 },
+          end: { x: cx + 180, y: cy + 50 },
+          color: '#0284c7',
+          size: 2
+        });
+        newElements.push({
+          id: `stone_hdr_${now}`,
+          type: 'text',
+          text: '💡 Stepping Stone Question:',
+          x: cx - 160,
+          y: cy - 25,
+          color: '#0369a1'
+        });
+        newElements.push({
+          id: `stone_txt_${now}`,
+          type: 'text',
+          text: stoneText,
+          x: cx - 160,
+          y: cy + 8,
+          color: '#0f172a'
+        });
+        newElements.push({
+          id: `stone_sub_${now}`,
+          type: 'text',
+          text: '(Solve this simpler anchor first)',
+          x: cx - 160,
+          y: cy + 32,
+          color: '#64748b'
+        });
+      } else if (diagramKind === 'number_line_hop') {
+        const eqStr = params.equation || '21 - 1 = 20';
+        const startVal = params.start !== undefined ? params.start : 21;
+        const stepVal = params.step !== undefined ? params.step : -1;
+        const resVal = params.result !== undefined ? params.result : 20;
+
+        // Title
+        newElements.push({
+          id: `hop_title_${now}`,
+          type: 'text',
+          text: `📐 Directed Hop Model: ${eqStr}`,
+          x: cx - 150,
+          y: cy - 75,
+          color: '#0f172a'
+        });
+        // Horizontal Axis line
+        newElements.push({
+          id: `hop_axis_${now}`,
+          type: 'shape',
+          shapeType: 'arrow',
+          start: { x: cx - 160, y: cy },
+          end: { x: cx + 160, y: cy },
+          color: '#334155',
+          size: 2.5
+        });
+        // Tick marks: result tick and start tick
+        newElements.push({
+          id: `hop_tk_res_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx - 50, y: cy - 12 },
+          end: { x: cx - 50, y: cy + 12 },
+          color: '#059669',
+          size: 2.5
+        });
+        newElements.push({
+          id: `hop_lbl_res_${now}`,
+          type: 'text',
+          text: `${resVal} (target)`,
+          x: cx - 80,
+          y: cy + 28,
+          color: '#059669'
+        });
+        newElements.push({
+          id: `hop_tk_st_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx + 70, y: cy - 12 },
+          end: { x: cx + 70, y: cy + 12 },
+          color: '#2563eb',
+          size: 2.5
+        });
+        newElements.push({
+          id: `hop_lbl_st_${now}`,
+          type: 'text',
+          text: `${startVal} (start)`,
+          x: cx + 45,
+          y: cy + 28,
+          color: '#2563eb'
+        });
+        // Directional Hop Arrow from Start back to Result
+        newElements.push({
+          id: `hop_arrow_${now}`,
+          type: 'shape',
+          shapeType: 'arrow',
+          start: { x: cx + 65, y: cy - 18 },
+          end: { x: cx - 45, y: cy - 18 },
+          color: '#dc2626',
+          size: 2.5
+        });
+        newElements.push({
+          id: `hop_jump_lbl_${now}`,
+          type: 'text',
+          text: `Jump ${stepVal}`,
+          x: cx - 8,
+          y: cy - 36,
+          color: '#dc2626'
+        });
+        // Bottom explanation
+        newElements.push({
+          id: `hop_expl_${now}`,
+          type: 'text',
+          text: `Step back ${Math.abs(stepVal)} from ${startVal} lands on ${resVal}`,
+          x: cx - 110,
+          y: cy + 60,
+          color: '#047857'
+        });
+      } else if (diagramKind === 'fraction_strip') {
+        const topNum = params.top_num || 3;
+        const topDen = params.top_den || 4;
+        const botNum = params.bottom_num || 1;
+        const botDen = params.bottom_den || 2;
+        const eqStr = params.equation || `${topNum}/${topDen} ÷ ${botNum}/${botDen}`;
+
+        newElements.push({
+          id: `fs_title_${now}`,
+          type: 'text',
+          text: `🍕 Fraction Bar Model: ${eqStr}`,
+          x: cx - 150,
+          y: cy - 75,
+          color: '#0f172a'
+        });
+        // Bar 1 (Top fraction)
+        newElements.push({
+          id: `fs_bar1_${now}`,
+          type: 'shape',
+          shapeType: 'rectangle',
+          start: { x: cx - 120, y: cy - 40 },
+          end: { x: cx + 120, y: cy - 10 },
+          color: '#2563eb',
+          size: 2
+        });
+        newElements.push({
+          id: `fs_lbl1_${now}`,
+          type: 'text',
+          text: `Dividend: ${topNum}/${topDen}`,
+          x: cx + 130,
+          y: cy - 20,
+          color: '#2563eb'
+        });
+        // Bar 2 (Divisor fraction)
+        newElements.push({
+          id: `fs_bar2_${now}`,
+          type: 'shape',
+          shapeType: 'rectangle',
+          start: { x: cx - 120, y: cy + 10 },
+          end: { x: cx + 120, y: cy + 40 },
+          color: '#059669',
+          size: 2
+        });
+        newElements.push({
+          id: `fs_lbl2_${now}`,
+          type: 'text',
+          text: `Divisor: ${botNum}/${botDen}`,
+          x: cx + 130,
+          y: cy + 30,
+          color: '#059669'
+        });
+        // Vertical divider on bar 2 at midpoint
+        newElements.push({
+          id: `fs_mid_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx, y: cy + 10 },
+          end: { x: cx, y: cy + 40 },
+          color: '#047857',
+          size: 2
+        });
+        newElements.push({
+          id: `fs_expl_${now}`,
+          type: 'text',
+          text: `How many ${botNum}/${botDen} bars fit into ${topNum}/${topDen}?`,
+          x: cx - 140,
+          y: cy + 65,
+          color: '#334155'
+        });
+      } else if (diagramKind === 'array_grid') {
+        const rows = Math.min(8, params.rows || 5);
+        const cols = Math.min(8, params.cols || 5);
+        const eqStr = params.equation || `${rows} × ${cols}`;
+        newElements.push({
+          id: `ag_title_${now}`,
+          type: 'text',
+          text: `🔢 Array Model: ${eqStr}`,
+          x: cx - 120,
+          y: cy - 60,
+          color: '#0f172a'
+        });
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            newElements.push({
+              id: `ag_dot_${r}_${c}_${now}`,
+              type: 'shape',
+              shapeType: 'circle',
+              start: { x: cx - (cols * 18) / 2 + c * 18 - 4, y: cy - (rows * 18) / 2 + r * 18 - 4 },
+              end: { x: cx - (cols * 18) / 2 + c * 18 + 4, y: cy - (rows * 18) / 2 + r * 18 + 4 },
+              color: '#2563eb',
+              size: 2
+            });
+          }
+        }
+      } else if (diagramKind === 'place_value') {
+        // 🔢 Place Value Breakdown Model (Tens | Ones)
+        newElements.push({
+          id: `pv_title_${now}`,
+          type: 'text',
+          text: '🔢 Place Value Table: 21 - 1 = 20',
+          x: cx - 140,
+          y: cy - 90,
+          color: '#0f172a'
+        });
+        // Header separator
+        newElements.push({
+          id: `pv_hline_hdr_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx - 140, y: cy - 40 },
+          end: { x: cx + 140, y: cy - 40 },
+          color: '#334155',
+          size: 2
+        });
+        // Column vertical divider
+        newElements.push({
+          id: `pv_vline_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx, y: cy - 60 },
+          end: { x: cx, y: cy + 70 },
+          color: '#334155',
+          size: 2
+        });
+        // Column headers
+        newElements.push({
+          id: `pv_lbl_tens_${now}`,
+          type: 'text',
+          text: 'Tens (10s)',
+          x: cx - 110,
+          y: cy - 48,
+          color: '#2563eb'
+        });
+        newElements.push({
+          id: `pv_lbl_ones_${now}`,
+          type: 'text',
+          text: 'Ones (1s)',
+          x: cx + 30,
+          y: cy - 48,
+          color: '#059669'
+        });
+        // Row 1: 21
+        newElements.push({
+          id: `pv_r1_t_${now}`,
+          type: 'text',
+          text: '2  (= 20)',
+          x: cx - 100,
+          y: cy - 12,
+          color: '#0f172a'
+        });
+        newElements.push({
+          id: `pv_r1_o_${now}`,
+          type: 'text',
+          text: '1',
+          x: cx + 55,
+          y: cy - 12,
+          color: '#0f172a'
+        });
+        // Row 2: - 1
+        newElements.push({
+          id: `pv_r2_t_${now}`,
+          type: 'text',
+          text: '- 0',
+          x: cx - 100,
+          y: cy + 20,
+          color: '#64748b'
+        });
+        newElements.push({
+          id: `pv_r2_o_${now}`,
+          type: 'text',
+          text: '- 1',
+          x: cx + 45,
+          y: cy + 20,
+          color: '#dc2626'
+        });
+        // Result line
+        newElements.push({
+          id: `pv_hline_res_${now}`,
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: cx - 140, y: cy + 35 },
+          end: { x: cx + 140, y: cy + 35 },
+          color: '#0f172a',
+          size: 2.5
+        });
+        // Result row: 20
+        newElements.push({
+          id: `pv_res_t_${now}`,
+          type: 'text',
+          text: '2  (= 20)',
+          x: cx - 100,
+          y: cy + 60,
+          color: '#2563eb'
+        });
+        newElements.push({
+          id: `pv_res_o_${now}`,
+          type: 'text',
+          text: '0',
+          x: cx + 55,
+          y: cy + 60,
+          color: '#059669'
+        });
+        // Bottom explanation
+        newElements.push({
+          id: `pv_expl_${now}`,
+          type: 'text',
+          text: '=> 1 - 1 = 0 in Ones; 2 in Tens stays 20 -> Answer: 20',
+          x: cx - 160,
+          y: cy + 95,
+          color: '#047857'
+        });
+      } else if (exampleType === 'circle_guide') {
+        // ⭕ Labeled Circle Geometry Guide
+        newElements.push({
+          id: `cg_title_${now}`,
+          type: 'text',
+          text: '⭕ Circle: d = 2r | Area = πr² | C = 2πr',
+          x: cx - 150,
+          y: cy - 105,
+          color: '#0f172a'
+        });
+        newElements.push({
+          id: `cg_circle_${now}`,
+          type: 'shape',
+          shapeType: 'circle',
+          start: { x: cx - 80, y: cy - 80 },
+          end: { x: cx + 80, y: cy + 80 },
+          color: '#2563eb',
+          size: 3
+        });
+        newElements.push({
+          id: `cg_radius_${now}`,
+          type: 'shape',
+          shapeType: 'arrow',
+          start: { x: cx, y: cy },
+          end: { x: cx + 80, y: cy },
+          color: '#dc2626',
+          size: 2.5
+        });
+        newElements.push({
+          id: `cg_lbl_r_${now}`,
+          type: 'text',
+          text: 'Radius (r)',
+          x: cx + 18,
+          y: cy - 8,
+          color: '#dc2626'
+        });
+        newElements.push({
+          id: `cg_center_${now}`,
+          type: 'shape',
+          shapeType: 'circle',
+          start: { x: cx - 3, y: cy - 3 },
+          end: { x: cx + 3, y: cy + 3 },
+          color: '#0f172a',
+          size: 3
+        });
+      } else if (exampleType === 'rectangle_guide') {
+        // 📐 Labeled Rectangle Geometry Guide
+        newElements.push({
+          id: `rg_title_${now}`,
+          type: 'text',
+          text: '📐 Rectangle: Area = w × h | Perimeter = 2(w + h)',
+          x: cx - 160,
+          y: cy - 85,
+          color: '#0f172a'
+        });
+        newElements.push({
+          id: `rg_rect_${now}`,
+          type: 'shape',
+          shapeType: 'rectangle',
+          start: { x: cx - 110, y: cy - 50 },
+          end: { x: cx + 110, y: cy + 50 },
+          color: '#059669',
+          size: 3
+        });
+        newElements.push({
+          id: `rg_lbl_w_${now}`,
+          type: 'text',
+          text: 'Width (w)',
+          x: cx - 35,
+          y: cy - 60,
+          color: '#059669'
+        });
+        newElements.push({
+          id: `rg_lbl_h_${now}`,
+          type: 'text',
+          text: 'Height (h)',
+          x: cx + 120,
+          y: cy + 5,
+          color: '#059669'
+        });
+      } else if (exampleType === 'number_line') {
         const lineY = cy;
         newElements.push({
           id: `nl_main_${now}`,
@@ -395,18 +914,23 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       }
 
       for (const el of newElements) {
+        el.role = role || 'tutor';
+        el.clientId = clientId;
         elementsRef.current.push(el);
         undoStackRef.current.push({ type: 'add', element: el });
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({
             type: 'whiteboard_element',
-            element: el
+            element: el,
+            role: role || 'tutor',
+            clientId
           }));
         }
       }
 
       updateHistoryState();
       redrawAll();
+      triggerSnapshotDispatch();
     }
   }));
 
@@ -439,6 +963,11 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
   useEffect(() => {
     if (!socket) return;
 
+    // Request full whiteboard state synchronization on connection
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'request_whiteboard_sync' }));
+    }
+
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -452,6 +981,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
             elementsRef.current.push(data.element);
           }
           redrawAll();
+        } else if (data.type === 'whiteboard_sync_full') {
+          // Late-joiner or full synchronization from server / peer
+          if (Array.isArray(data.elements)) {
+            elementsRef.current = data.elements;
+            redrawAll();
+          }
         } else if (data.type === 'whiteboard_delete_element') {
           elementsRef.current = elementsRef.current.filter(el => el.id !== data.elementId);
           redrawAll();
@@ -488,12 +1023,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       // Undo: Ctrl+Z or Cmd+Z (without Shift)
       if (key === 'z' && !e.shiftKey) {
         e.preventDefault();
-        handleUndo();
+        handleUndoRef.current?.();
       } 
       // Redo: Ctrl+Y or Cmd+Y OR Ctrl+Shift+Z / Cmd+Shift+Z
       else if (key === 'y' || (key === 'z' && e.shiftKey)) {
         e.preventDefault();
-        handleRedo();
+        handleRedoRef.current?.();
       }
     };
 
@@ -519,9 +1054,11 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       ctx.fillRect(0, 0, rect.width, rect.height);
     }
 
-    // Apply Camera Transform
-    if (ctx.translate) ctx.translate(pan.x, pan.y);
-    if (ctx.scale) ctx.scale(zoom, zoom);
+    // Apply Camera Transform using the latest camera ref to prevent viewport jumps
+    const curPan = panRef.current || pan;
+    const curZoom = zoomRef.current || zoom;
+    if (ctx.translate) ctx.translate(curPan.x, curPan.y);
+    if (ctx.scale) ctx.scale(curZoom, curZoom);
 
     // Render all elements in world coordinates
     for (const el of elementsRef.current) {
@@ -644,6 +1181,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
   const handleUndo = () => {
     if (undoStackRef.current.length === 0) return;
     const action = undoStackRef.current.pop();
+    const activeSocket = socketRef.current || socket;
 
     if (action.type === 'add') {
       // Undo an added element -> remove it from elementsRef and broadcast deletion
@@ -651,10 +1189,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       if (idx !== -1) {
         const removed = elementsRef.current.splice(idx, 1)[0];
         redoStackRef.current.push({ type: 'add', element: removed, index: idx });
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+          activeSocket.send(JSON.stringify({
             type: 'whiteboard_delete_element',
-            elementId: removed.id
+            elementId: removed.id,
+            role: role || 'tutor',
+            clientId
           }));
         }
       }
@@ -663,10 +1203,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       const insertIdx = Math.min(action.index, elementsRef.current.length);
       elementsRef.current.splice(insertIdx, 0, action.element);
       redoStackRef.current.push({ type: 'delete', element: action.element, index: insertIdx });
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_element',
-          element: action.element
+          element: action.element,
+          role: role || 'tutor',
+          clientId
         }));
       }
     } else if (action.type === 'batch_delete') {
@@ -678,10 +1220,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         elementsRef.current.splice(insertIdx, 0, item.element);
         restoredItems.push({ element: item.element, index: insertIdx });
         restoredElements.push(item.element);
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+          activeSocket.send(JSON.stringify({
             type: 'whiteboard_element',
-            element: item.element
+            element: item.element,
+            role: role || 'tutor',
+            clientId
           }));
         }
       }
@@ -695,16 +1239,19 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
   const handleRedo = () => {
     if (redoStackRef.current.length === 0) return;
     const action = redoStackRef.current.pop();
+    const activeSocket = socketRef.current || socket;
 
     if (action.type === 'add') {
       // Redo add -> re-insert element and broadcast
       const insertIdx = action.index !== undefined ? Math.min(action.index, elementsRef.current.length) : elementsRef.current.length;
       elementsRef.current.splice(insertIdx, 0, action.element);
       undoStackRef.current.push({ type: 'add', element: action.element });
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_element',
-          element: action.element
+          element: action.element,
+          role: role || 'tutor',
+          clientId
         }));
       }
     } else if (action.type === 'delete') {
@@ -713,10 +1260,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       if (idx !== -1) {
         const removed = elementsRef.current.splice(idx, 1)[0];
         undoStackRef.current.push({ type: 'delete', element: removed, index: idx });
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+          activeSocket.send(JSON.stringify({
             type: 'whiteboard_delete_element',
-            elementId: removed.id
+            elementId: removed.id,
+            role: role || 'tutor',
+            clientId
           }));
         }
       }
@@ -733,10 +1282,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         }
       }
       undoStackRef.current.push({ type: 'batch_delete', items: deletedItems });
-      if (deletedIds.length > 0 && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      if (deletedIds.length > 0 && activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_delete_elements',
-          elementIds: deletedIds
+          elementIds: deletedIds,
+          role: role || 'tutor',
+          clientId
         }));
       }
     }
@@ -745,14 +1296,14 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     redrawAll();
   };
 
+  handleUndoRef.current = handleUndo;
+  handleRedoRef.current = handleRedo;
+
   const drawRemoteStroke = (stroke) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const w = rect.width;
-    const h = rect.height;
 
     const { x0, y0, x1, y1, cx, cy, isDot, color: sColor, size: sSize, tool: sTool } = stroke;
 
@@ -784,17 +1335,17 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
     if (isDot) {
       ctx.beginPath();
-      ctx.arc(x0 * w, y0 * h, (sTool === 'eraser' ? sSize * 1.75 : sSize / 2), 0, Math.PI * 2);
+      ctx.arc(x0, y0, (sTool === 'eraser' ? sSize * 1.75 : sSize / 2), 0, Math.PI * 2);
       ctx.fill();
     } else if (cx !== undefined && cy !== undefined) {
       ctx.beginPath();
-      ctx.moveTo(x0 * w, y0 * h);
-      ctx.quadraticCurveTo(cx * w, cy * h, x1 * w, y1 * h);
+      ctx.moveTo(x0, y0);
+      ctx.quadraticCurveTo(cx, cy, x1, y1);
       ctx.stroke();
     } else {
       ctx.beginPath();
-      ctx.moveTo(x0 * w, y0 * h);
-      ctx.lineTo(x1 * w, y1 * h);
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
       ctx.stroke();
     }
     ctx.restore();
@@ -983,17 +1534,19 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     ctx.stroke();
     ctx.restore();
 
-    if (onStroke && rect.width > 0 && rect.height > 0) {
+    if (onStroke) {
       onStroke({
-        x0: startX / rect.width,
-        y0: startY / rect.height,
-        cx: ctrlX / rect.width,
-        cy: ctrlY / rect.height,
-        x1: endX / rect.width,
-        y1: endY / rect.height,
+        x0: startX,
+        y0: startY,
+        cx: ctrlX,
+        cy: ctrlY,
+        x1: endX,
+        y1: endY,
         color,
         size,
-        tool
+        tool,
+        role,
+        clientId
       });
     }
   };
@@ -1363,14 +1916,16 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         }));
       }
 
-      if (onStroke && rect.width > 0 && rect.height > 0) {
+      if (onStroke) {
         onStroke({
-          x0: p.x / rect.width,
-          y0: p.y / rect.height,
+          x0: p.x,
+          y0: p.y,
           isDot: true,
           color,
           size,
-          tool
+          tool,
+          role,
+          clientId
         });
       }
     } else if (hasMoved.current && lastDrawnPos.current && pts.length >= 2) {
@@ -1400,15 +1955,17 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         }));
       }
 
-      if (onStroke && rect.width > 0 && rect.height > 0) {
+      if (onStroke) {
         onStroke({
-          x0: lastDrawnPos.current.x / rect.width,
-          y0: lastDrawnPos.current.y / rect.height,
-          x1: lastP.x / rect.width,
-          y1: lastP.y / rect.height,
+          x0: lastDrawnPos.current.x,
+          y0: lastDrawnPos.current.y,
+          x1: lastP.x,
+          y1: lastP.y,
           color,
           size,
-          tool
+          tool,
+          role,
+          clientId
         });
       }
     }
@@ -1416,6 +1973,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     isDrawing.current = false;
     rawPoints.current = [];
     lastDrawnPos.current = null;
+    redrawAll();
   };
 
   // Trackpad 2-Finger Navigation & Wheel Zoom
@@ -1454,6 +2012,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (broadcast && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'whiteboard_clear' }));
     }
+    triggerSnapshotDispatch();
   };
 
   const handlePasteTextToBoard = (text) => {

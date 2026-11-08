@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Sparkles, ChevronRight, HelpCircle, ExternalLink, Activity } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Sparkles, ChevronRight, GripVertical } from 'lucide-react';
 import { getApiBase } from '../config/apiConfig';
 
 /**
@@ -335,3 +335,241 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
     </div>
   );
 }
+
+/**
+ * MovableStudentFaceWidget (defaults to top-right corner of whiteboard)
+ * Draggable anywhere on the canvas so tutor can position it freely.
+ * Displays:
+ * 1. Expressive StateFace SVG showing the rolling statistical mode over the last 15s.
+ * 2. Mode affective state label with confidence / consistency percentage.
+ * 3. Real-time instant expression indicator on hover.
+ */
+export function MovableStudentFaceWidget({ roomCode, socket, onOpenReport, initialX, initialY }) {
+  const [pulse, setPulse] = useState({
+    engagement_score: 0,
+    status_label: 'Waiting for Video',
+    status_color: 'gray',
+    attention_state: 'no_face',
+    mode_expression: 'no_face',
+    mode_color: 'gray',
+    mode_label: 'Waiting for Video',
+    mode_frequency_pct: 0,
+    instant_expression: 'no_face',
+    instant_color: 'gray',
+    instant_label: 'No Face',
+    student_face_detected: false,
+    brow_furrow_level: 0.0,
+    gaze_direction: 'unknown'
+  });
+
+  const [isHovered, setIsHovered] = useState(false);
+
+  // Position & Draggable state (starts in top-right by default)
+  const [pos, setPos] = useState(() => ({
+    x: initialX !== undefined ? initialX : (typeof window !== 'undefined' ? Math.max(16, window.innerWidth - 240) : 900),
+    y: initialY !== undefined ? initialY : 56
+  }));
+  const isDragging = useRef(false);
+  const hasDraggedRef = useRef(false);
+  const dragOffset = useRef({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+
+  // Keep top-right alignment on window resize if user has not manually moved it
+  useEffect(() => {
+    const handleResize = () => {
+      if (!hasDraggedRef.current) {
+        setPos(p => ({ ...p, x: Math.max(16, window.innerWidth - 240) }));
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const handlePointerDown = (e) => {
+    if (e.target.closest('button')) return;
+    isDragging.current = true;
+    hasDraggedRef.current = true;
+    setDragging(true);
+    dragOffset.current = {
+      x: e.clientX - pos.x,
+      y: e.clientY - pos.y
+    };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDragging.current) return;
+    const maxX = Math.max(10, window.innerWidth - (isHovered ? 290 : 230));
+    const maxY = Math.max(50, window.innerHeight - 90);
+    const nextX = Math.max(8, Math.min(maxX, e.clientX - dragOffset.current.x));
+    const nextY = Math.max(52, Math.min(maxY, e.clientY - dragOffset.current.y));
+    setPos({ x: nextX, y: nextY });
+  };
+
+  const handlePointerUp = (e) => {
+    isDragging.current = false;
+    setDragging(false);
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+  };
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const handleMessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'engagement_pulse' && data.data) {
+          if (isMounted) setPulse(data.data);
+        }
+      } catch {}
+    };
+
+    if (socket) {
+      socket.addEventListener('message', handleMessage);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'request_engagement_pulse' }));
+      }
+    }
+
+    const fetchPulse = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/api/rooms/${roomCode}/engagement/`);
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) setPulse(data);
+        }
+      } catch {}
+    };
+
+    fetchPulse();
+    const interval = setInterval(fetchPulse, 2000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      if (socket) socket.removeEventListener('message', handleMessage);
+    };
+  }, [roomCode, socket]);
+
+  // Mode display parameters
+  const modeColor = pulse.mode_color || pulse.status_color || 'gray';
+  const modeState = pulse.mode_expression || pulse.attention_state || 'no_face';
+  const modeLabel = pulse.mode_label || (modeState === 'confused' ? 'Confused' : modeState === 'engaged' ? 'Engaged & Attentive' : modeState === 'distracted' ? 'Looking Away' : 'Listening');
+
+  const themeStyles = {
+    green: { border: 'rgba(16, 185, 129, 0.55)', text: '#34d399', bg: 'rgba(6, 78, 59, 0.45)', glow: 'rgba(16, 185, 129, 0.35)' },
+    red: { border: 'rgba(239, 68, 68, 0.65)', text: '#f87171', bg: 'rgba(69, 10, 10, 0.5)', glow: 'rgba(239, 68, 68, 0.45)' },
+    yellow: { border: 'rgba(245, 158, 11, 0.55)', text: '#fbbf24', bg: 'rgba(69, 26, 3, 0.45)', glow: 'rgba(245, 158, 11, 0.35)' },
+    blue: { border: 'rgba(14, 165, 233, 0.55)', text: '#38bdf8', bg: 'rgba(12, 74, 110, 0.45)', glow: 'rgba(14, 165, 233, 0.35)' },
+    gray: { border: 'rgba(100, 116, 139, 0.4)', text: '#94a3b8', bg: 'rgba(30, 41, 59, 0.45)', glow: 'rgba(100, 116, 139, 0.2)' }
+  }[modeColor] || { border: 'rgba(100, 116, 139, 0.4)', text: '#94a3b8', bg: 'rgba(30, 41, 59, 0.45)', glow: 'rgba(100, 116, 139, 0.2)' };
+
+  return (
+    <div
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      title="Drag to reposition student mood widget • Hover for instant metrics"
+      style={{
+        position: 'absolute',
+        top: `${pos.y}px`,
+        left: `${pos.x}px`,
+        zIndex: 36,
+        display: 'flex',
+        flexDirection: isHovered ? 'column' : 'row',
+        alignItems: isHovered ? 'flex-start' : 'center',
+        gap: '8px',
+        padding: '7px 12px',
+        backgroundColor: 'rgba(15, 23, 42, 0.94)',
+        backdropFilter: 'blur(14px)',
+        borderRadius: '13px',
+        border: `1.5px solid ${themeStyles.border}`,
+        boxShadow: dragging
+          ? `0 14px 32px rgba(0, 0, 0, 0.7), 0 0 20px ${themeStyles.glow}`
+          : `0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px ${themeStyles.glow}`,
+        cursor: dragging ? 'grabbing' : 'grab',
+        transition: dragging ? 'none' : 'box-shadow 0.2s ease, border-color 0.2s ease',
+        userSelect: 'none',
+        maxWidth: isHovered ? '280px' : '230px',
+        touchAction: 'none'
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+        {/* Drag handle grip */}
+        <div style={{ display: 'flex', alignItems: 'center', color: '#64748b' }}>
+          <GripVertical size={13} />
+        </div>
+
+        {/* SVG Mode Face */}
+        <StateFace
+          statusColor={modeColor}
+          attentionState={modeState}
+          isFaceDetected={pulse.student_face_detected}
+        />
+
+        {/* Mode Label & Frequency */}
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+            <span style={{ fontSize: '9px', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Student Mode (15s)
+            </span>
+            {pulse.student_face_detected && pulse.mode_frequency_pct > 0 && (
+              <span style={{ fontSize: '9px', fontWeight: 700, color: themeStyles.text }}>
+                {pulse.mode_frequency_pct}%
+              </span>
+            )}
+          </div>
+          <span style={{
+            fontSize: '12px',
+            fontWeight: 700,
+            color: themeStyles.text,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis'
+          }}>
+            {pulse.student_face_detected ? modeLabel : 'Waiting for Video'}
+          </span>
+        </div>
+      </div>
+
+      {/* Expanded Hover Detail */}
+      {isHovered && pulse.student_face_detected && (
+        <div style={{
+          width: '100%',
+          marginTop: '4px',
+          paddingTop: '6px',
+          borderTop: '1px solid rgba(51, 65, 85, 0.7)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+          fontSize: '11px',
+          color: '#cbd5e1'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#94a3b8' }}>Instant State:</span>
+            <span style={{ fontWeight: 600, color: pulse.instant_color === 'red' ? '#f87171' : pulse.instant_color === 'green' ? '#34d399' : '#38bdf8' }}>
+              {pulse.instant_label || 'Neutral'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#94a3b8' }}>Brow Furrow:</span>
+            <span style={{ fontWeight: 600 }}>{Math.round((pulse.brow_furrow_level || 0) * 100)}%</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#94a3b8' }}>Gaze:</span>
+            <span style={{ fontWeight: 600, textTransform: 'capitalize' }}>{pulse.gaze_direction || 'Forward'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#94a3b8' }}>Comprehension:</span>
+            <span style={{ fontWeight: 600, color: '#38bdf8' }}>{pulse.engagement_score || 80}%</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Preserve alias for backward compatibility
+export const TopLeftRollingFaceWidget = MovableStudentFaceWidget;

@@ -8,6 +8,7 @@ import AICoachPanel from './AICoachPanel';
 import EndSessionReportModal from './EndSessionReportModal';
 import CoachToast from './CoachToast';
 import CoachNotebook from './CoachNotebook';
+import { MovableStudentFaceWidget } from './StudentStateWidget';
 import { getWebSocketUrl } from '../config/apiConfig';
 
 const MeetingRoom = ({ session, onLeave }) => {
@@ -31,6 +32,7 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [isNotebookOpen, setIsNotebookOpen] = useState(false);
 
   // Picture-in-Picture window position & collapse state
+  // Starts in top-left (16, 56) while MovableStudentFaceWidget starts in top-right
   const [pipPos, setPipPos] = useState({ x: 16, y: 56 });
   const [pipCollapsed, setPipCollapsed] = useState(false);
   const isDraggingPip = useRef(false);
@@ -53,10 +55,14 @@ const MeetingRoom = ({ session, onLeave }) => {
       ws.onopen = () => {
         if (!isMounted) return;
         setConnectionStatus('connected');
+        const storedKey = localStorage.getItem('whack_llm_key') || undefined;
+        const storedProvider = localStorage.getItem('whack_llm_provider') || undefined;
         ws.send(JSON.stringify({
           type: 'join',
           role,
-          clientId
+          clientId,
+          apiKey: storedKey,
+          provider: storedProvider !== 'auto' ? storedProvider : undefined
         }));
       };
 
@@ -90,6 +96,32 @@ const MeetingRoom = ({ session, onLeave }) => {
                   read: false
                 }
               ]);
+            }
+          } else if (data.type === 'coaching_report_updated' && data.data) {
+            const rep = data.data;
+            if (role === 'tutor' && rep.whiteboard_relevance) {
+              const rel = rep.whiteboard_relevance;
+              const insightText = rel.acknowledgment || rel.pedagogical_insight;
+              if (insightText) {
+                setNotebookEntries(prev => {
+                  const entryMsg = `📋 ${insightText}`;
+                  if (prev.length > 0 && prev[prev.length - 1].text === entryMsg) {
+                    return prev;
+                  }
+                  return [
+                    ...prev,
+                    {
+                      id: `rep_${Date.now()}`,
+                      tier: rel.problem_status === 'Answered with misconception' ? 'T3' : 'T1',
+                      category: rel.problem_status || 'Board Analysis',
+                      text: entryMsg,
+                      suggestion: rel.pupil_latest_work ? `Pupil work: ${rel.pupil_latest_work}` : undefined,
+                      timestamp: Date.now(),
+                      read: false
+                    }
+                  ];
+                });
+              }
             }
           }
         } catch (e) {}
@@ -127,44 +159,68 @@ const MeetingRoom = ({ session, onLeave }) => {
   }, [roomCode, role, clientId]);
 
   // Adaptive Background Coaching Evaluation for Tutor
-  // Runs every 90 seconds, and immediately triggers when student makes 3+ active contributions on whiteboard
+  // Runs every 90 seconds, and immediately triggers 1.8s after writing/drawing pause
   const studentEditsSinceLastEval = useRef(0);
   const lastAdaptiveEvalTime = useRef(Date.now());
+  const studentWriteDebounce = useRef(null);
+
+  const maybeEvaluate = async (reason = 'timer') => {
+    if (role !== 'tutor') return;
+    try {
+      const storedKey = localStorage.getItem('whack_llm_key') || undefined;
+      const storedProvider = localStorage.getItem('whack_llm_provider') || undefined;
+      const apiBase = getApiBase();
+
+      // Pass latest auto-framed whiteboard snapshot directly
+      let wbSnapshot = undefined;
+      if (whiteboardRef?.current?.getSnapshot) {
+        wbSnapshot = whiteboardRef.current.getSnapshot();
+      }
+
+      await fetch(`${apiBase}/api/rooms/${roomCode}/coach/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: storedKey,
+          provider: storedProvider !== 'auto' ? storedProvider : undefined,
+          whiteboardSnapshot: wbSnapshot
+        })
+      });
+      studentEditsSinceLastEval.current = 0;
+      lastAdaptiveEvalTime.current = Date.now();
+    } catch (err) {
+      console.debug('Adaptive coach eval notice:', err);
+    }
+  };
+
+  const handleWhiteboardChange = () => {
+    if (role !== 'tutor') return;
+    // Debounce 1.8s after drawing pause before running automated evaluation
+    if (studentWriteDebounce.current) clearTimeout(studentWriteDebounce.current);
+    studentWriteDebounce.current = setTimeout(() => {
+      maybeEvaluate('local_whiteboard_edit');
+    }, 1800);
+  };
 
   useEffect(() => {
     if (role !== 'tutor' || !socket) return;
 
-    const maybeEvaluate = async (reason = 'timer') => {
-      try {
-        const storedKey = localStorage.getItem('whack_llm_key') || undefined;
-        const storedProvider = localStorage.getItem('whack_llm_provider') || undefined;
-        const apiBase = getApiBase();
-
-        await fetch(`${apiBase}/api/rooms/${roomCode}/coach/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: storedKey,
-            provider: storedProvider !== 'auto' ? storedProvider : undefined
-          })
-        });
-        studentEditsSinceLastEval.current = 0;
-        lastAdaptiveEvalTime.current = Date.now();
-      } catch (err) {
-        console.debug('Adaptive coach eval notice:', err);
-      }
-    };
-
     const handleMessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.type === 'whiteboard_element' && (data.role === 'student' || data.element?.role === 'student')) {
+        if (
+          data.type === 'whiteboard_element' ||
+          data.type === 'whiteboard_stroke' ||
+          data.type === 'whiteboard_delete_element' ||
+          data.type === 'whiteboard_clear'
+        ) {
           studentEditsSinceLastEval.current += 1;
-          const now = Date.now();
-          // If student has made 3+ edits and at least 30s have passed since last eval, evaluate sooner!
-          if (studentEditsSinceLastEval.current >= 3 && (now - lastAdaptiveEvalTime.current) >= 30000) {
-            maybeEvaluate('student_activity_spike');
-          }
+          
+          // Debounce 1.8s after student finishes writing/drawing their answer attempt
+          if (studentWriteDebounce.current) clearTimeout(studentWriteDebounce.current);
+          studentWriteDebounce.current = setTimeout(() => {
+            maybeEvaluate('remote_whiteboard_edit');
+          }, 1800);
         }
       } catch {}
     };
@@ -178,6 +234,7 @@ const MeetingRoom = ({ session, onLeave }) => {
 
     return () => {
       socket.removeEventListener('message', handleMessage);
+      if (studentWriteDebounce.current) clearTimeout(studentWriteDebounce.current);
       clearInterval(interval);
     };
   }, [role, socket, roomCode]);
@@ -201,28 +258,122 @@ const MeetingRoom = ({ session, onLeave }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Demo Nudge Trigger (hotkey: Ctrl+Shift+D or Alt+D)
+  // Demo Nudge Trigger (hotkey: Ctrl+Shift+D or Alt+D) - cycles through T3 & T2 alerts
+  const demoCycleRef = useRef(0);
   const triggerDemoNudge = () => {
+    const triggers = ['demo_face_confusion', 'demo_subtraction', 'demo_geometry', 'demo_pacing', 'demo_fractions'];
+    const currentTrigger = triggers[demoCycleRef.current % triggers.length];
+    demoCycleRef.current += 1;
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'trigger_demo_nudge',
-        triggerType: 'demo_fractions'
+        triggerType: currentTrigger
       }));
     } else {
-      const demoToast = {
-        tier: 'T3',
-        category: 'confusion',
-        toast_text: 'Student stuck on dividing fractions — try a pizza-slice example?',
-        action_label: '🍕 Drop on Board',
-        example_type: 'fraction_pizza',
-        notebook_entry: "🔴 Student confused: 'wait, how do we divide fractions?'",
-        timestamp: Date.now()
-      };
+      let demoToast;
+      if (currentTrigger === 'demo_face_confusion') {
+        demoToast = {
+          tier: 'T3',
+          category: 'visual_confusion',
+          context_badge: '😟 Rolling Confusion',
+          toast_text: "Student looks consistently puzzled/confused while you're explaining '21 - 1' — pause to check understanding?",
+          action_label: '📐 Draw 21 - 1 Hop Line',
+          example_type: 'place_value',
+          stepping_stone: 'Try simpler anchor: 20 - 1 = ?',
+          counter_example: "Ask: 'If 21 - 1 was 16, what would 16 + 1 be?'",
+          custom_diagram: {
+            type: 'custom_diagram',
+            kind: 'number_line_hop',
+            title: 'Directed Hop Model: 21 - 1 = 20',
+            params: { equation: '21 - 1 = 20', start: 21, step: -1, result: 20, tens: 2, ones: 1 }
+          },
+          notebook_entry: "🔴 Video Detection: Student showing rolling brow furrow/confusion while tutor wrote '21 - 1'.",
+          timestamp: Date.now()
+        };
+      } else if (currentTrigger === 'demo_geometry') {
+        demoToast = {
+          tier: 'T2',
+          category: 'whiteboard_geometry',
+          context_badge: '🎯 Board Detection',
+          toast_text: 'Student drew circle on board — drop radius & diameter guide?',
+          action_label: '⭕ Drop on Board',
+          example_type: 'circle_guide',
+          stepping_stone: 'Formulas: Radius r = d / 2, Area = πr², Circumference = 2πr',
+          counter_example: 'Check: Is the line spanning the whole center (diameter) or from center to edge (radius)?',
+          custom_diagram: {
+            type: 'custom_diagram',
+            kind: 'circle_properties',
+            title: 'Circle Geometry: Radius & Diameter',
+            params: { radius: 5, diameter: 10, unit: 'cm' }
+          },
+          notebook_entry: '🟡 Board Detection: Geometric circle identified; anchor with labeled radius/diameter formulas.',
+          timestamp: Date.now()
+        };
+      } else if (currentTrigger === 'demo_pacing') {
+        demoToast = {
+          tier: 'T2',
+          category: 'pacing',
+          context_badge: '⏳ Quiet Spell',
+          toast_text: 'Student has been quiet for >15s on recent step — offer an open-ended hint?',
+          action_label: '💡 Offer Hint',
+          example_type: 'number_line',
+          stepping_stone: "Try asking: 'What is the first step you want to try?'",
+          counter_example: 'Avoid giving the whole answer immediately; prompt student for their current thought.',
+          custom_diagram: {
+            type: 'custom_diagram',
+            kind: 'number_line_hop',
+            title: 'Number Line Step Hint',
+            params: { equation: 'Next step', start: 0, step: 1, result: 1 }
+          },
+          notebook_entry: '🟡 Pacing Notice: Extended pause detected; suggested prompt check-in.',
+          timestamp: Date.now()
+        };
+      } else if (currentTrigger === 'demo_subtraction') {
+        demoToast = {
+          tier: 'T3',
+          category: 'whiteboard_misconception',
+          context_badge: '⚠️ 2nd Wrong Attempt',
+          toast_text: "Student answered '16' to '21 - 1' — try a stepping-stone anchor?",
+          action_label: '📐 Draw 21 - 1 Hop Line',
+          example_type: 'place_value',
+          stepping_stone: 'Try simpler anchor: 20 - 1 = ?',
+          counter_example: "Ask: 'If 21 - 1 was 16, what would 16 + 1 be?'",
+          custom_diagram: {
+            type: 'custom_diagram',
+            kind: 'number_line_hop',
+            title: 'Directed Hop Model: 21 - 1 = 20',
+            params: { equation: '21 - 1 = 20', start: 21, step: -1, result: 20, tens: 2, ones: 1 }
+          },
+          notebook_entry: "🔴 Repeated Misconception: Student answered '16' to '21 - 1' twice (place-value error).",
+          timestamp: Date.now()
+        };
+      } else {
+        demoToast = {
+          tier: 'T3',
+          category: 'confusion',
+          context_badge: 'Spoken Confusion',
+          toast_text: 'Student stuck on dividing fractions — try a pizza-slice example?',
+          action_label: '🍕 Draw Fraction Model',
+          example_type: 'fraction_pizza',
+          stepping_stone: "Try anchor: '1 ÷ 1/2 = ?' (how many halves in 1 whole?)",
+          counter_example: "Ask: 'If we multiply our answer by the divisor, do we get back the original?'",
+          custom_diagram: {
+            type: 'custom_diagram',
+            kind: 'fraction_strip',
+            title: 'Fraction Bar Model: 3/4 ÷ 1/2',
+            params: { equation: '3/4 ÷ 1/2', top_num: 3, top_den: 4, bottom_num: 1, bottom_den: 2 }
+          },
+          notebook_entry: "🔴 Spoken Confusion: 'wait, how do we divide fractions?'",
+          timestamp: Date.now()
+        };
+      }
+
       setActiveToast(demoToast);
       setNotebookEntries(prev => [...prev, {
         id: `entry_${Date.now()}`,
-        tier: 'T3',
-        category: 'Confusion',
+        tier: demoToast.tier,
+        category: demoToast.context_badge || 'Live Coach Alert',
         text: demoToast.notebook_entry,
         suggestion: demoToast.action_label,
         timestamp: Date.now(),
@@ -231,9 +382,9 @@ const MeetingRoom = ({ session, onLeave }) => {
     }
   };
 
-  const handleApplyExample = (exampleType) => {
+  const handleApplyExample = (examplePayload) => {
     if (whiteboardRef.current?.insertVisualExample) {
-      whiteboardRef.current.insertVisualExample(exampleType || 'fraction_pizza');
+      whiteboardRef.current.insertVisualExample(examplePayload || 'number_line_hop');
     }
     setActiveToast(null);
   };
@@ -339,7 +490,7 @@ const MeetingRoom = ({ session, onLeave }) => {
           {role === 'tutor' && (
             <button
               onClick={triggerDemoNudge}
-              title="Ctrl+Shift+D: Trigger 10s Confusion Demo Nudge"
+              title="Ctrl+Shift+D: Cycle T3 & T2 Alerts (Rolling confusion while explaining, repeated errors, geometry guides, pacing silence)"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -465,7 +616,17 @@ const MeetingRoom = ({ session, onLeave }) => {
           socket={socket}
           role={role}
           clientId={clientId}
+          onWhiteboardChange={handleWhiteboardChange}
         />
+
+        {/* Movable Tutor Student Face Mode Widget (starts top-right, draggable anywhere) */}
+        {role === 'tutor' && (
+          <MovableStudentFaceWidget
+            roomCode={roomCode}
+            socket={socket}
+            onOpenReport={() => setShowAICoach(true)}
+          />
+        )}
 
         {/* Top-Left: Picture-in-Picture Video Call (approx 1/9th total area) */}
         <div

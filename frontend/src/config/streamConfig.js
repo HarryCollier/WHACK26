@@ -7,8 +7,8 @@ export const STREAM_CONFIG = {
   // Whiteboard content monitoring interval (e.g. every 3 seconds)
   WHITEBOARD_SNAPSHOT_INTERVAL_MS: 3000,
 
-  // Audio chunk interval: 7 seconds gives Whisper complete sentence context with low latency
-  AUDIO_CHUNK_INTERVAL_MS: 7000,
+  // Audio chunk interval: 2.5s gives low-latency subtitles without queue backlog
+  AUDIO_CHUNK_INTERVAL_MS: 2500,
 
   // Video resolution for snapshots
   VIDEO_WIDTH: 480,

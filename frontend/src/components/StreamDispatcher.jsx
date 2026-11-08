@@ -21,6 +21,7 @@ const StreamDispatcher = ({
   const hiddenCanvasRef = useRef(null);
   const videoElemRef = useRef(null);
   const imageCaptureRef = useRef(null);
+  const lastSentSnapshotRef = useRef(null);
 
   // 1. Audio MediaRecorder: Slices audio into timestamped chunks for live transcription
   useEffect(() => {
@@ -266,7 +267,9 @@ const StreamDispatcher = ({
       if (socket.readyState !== WebSocket.OPEN) return;
       if (whiteboardRef?.current?.getSnapshot) {
         const wbDataUrl = whiteboardRef.current.getSnapshot();
-        if (wbDataUrl) {
+        // Only dispatch snapshot if content has changed, preventing idle network spam and debounce timer resets
+        if (wbDataUrl && wbDataUrl !== lastSentSnapshotRef.current) {
+          lastSentSnapshotRef.current = wbDataUrl;
           socket.send(JSON.stringify({
             type: 'whiteboard_snapshot',
             role,

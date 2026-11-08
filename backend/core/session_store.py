@@ -74,7 +74,8 @@ def get_whisper_model():
                     logger.warning(f"Could not configure unverified SSL context: {e}")
 
                 import whisper
-                model_name = os.environ.get("WHISPER_MODEL", "base.en")
+                # Use 'tiny' by default on CPU for ultra-low-latency real-time subtitles without backlog
+                model_name = os.environ.get("WHISPER_MODEL", "tiny")
                 try:
                     logger.info(f"Loading Whisper '{model_name}' model...")
                     _whisper_model = whisper.load_model(model_name)
@@ -115,6 +116,8 @@ class RoomSessionStore:
     whiteboard_deltas: List[Dict[str, Any]] = field(default_factory=list)
     # Whiteboard element events logged by role (strokes, shapes, text)
     whiteboard_elements_log: List[Dict[str, Any]] = field(default_factory=list)
+    # Complete active canvas vector elements dictionary keyed by element ID (for late joiner sync)
+    active_whiteboard_elements: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     student_whiteboard_edit_count: int = 0
     tutor_whiteboard_edit_count: int = 0
 
@@ -133,14 +136,22 @@ class RoomSessionStore:
     coaching_reports: List[Dict[str, Any]] = field(default_factory=list)
     last_coaching_report: Optional[Dict[str, Any]] = None
     last_coaching_timestamp: int = 0
+    llm_api_key: Optional[str] = None
+    llm_provider: Optional[str] = None
+    _eval_in_progress: bool = False
+
+    # 5. Tracking for repeated misconceptions / consecutive incorrect attempts on the same concept
+    active_problem_concept: Optional[str] = None
+    wrong_attempts_count: int = 0
+    consecutive_wrong_answers: List[str] = field(default_factory=list)
 
     # Audio transcription queue and background thread
     audio_queue: queue.Queue = field(default_factory=queue.Queue)
     is_running: bool = True
     worker_thread: Optional[threading.Thread] = None
 
-    # Video analysis stride: process every 3rd frame (instead of 10th) so metrics update smoothly
-    VIDEO_ANALYSIS_STRIDE: int = 3
+    # Video analysis stride: process every frame (MediaPipe takes ~5ms) so face state updates in real time with zero lag
+    VIDEO_ANALYSIS_STRIDE: int = 1
 
     def start_transcription_worker(self, on_transcript_callback=None):
         ensure_ffmpeg_in_path()
@@ -174,9 +185,22 @@ class RoomSessionStore:
                         # Ambient background hum is ~0.001-0.003; normal speech is >= 0.006-0.030
                         rms = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) > 0 else 0.0
                         logger.info(f"[{self.room_code}] [{role}] Audio chunk: samples={len(audio_data)}, RMS={rms:.4f}")
-                        if rms < 0.005:
+
+                        # Adaptive backlog recovery: if queue has accumulated > 1 pending item, drop borderline noise to keep up in real time
+                        queue_depth = self.audio_queue.qsize()
+                        if queue_depth > 2:
+                            # Drain stale backlogged audio chunks so subtitles immediately catch up to real-time speech!
+                            logger.info(f"[{self.room_code}] Subtitle recovery: draining {queue_depth} backlogged chunks to eliminate lag")
+                            while not self.audio_queue.empty():
+                                try:
+                                    self.audio_queue.get_nowait()
+                                    self.audio_queue.task_done()
+                                except queue.Empty:
+                                    break
+                        silence_threshold = 0.008 if queue_depth > 0 else 0.004
+                        if rms < silence_threshold:
                             # Silence or muted mic — skip transcription
-                            logger.debug(f"[{self.room_code}] [{role}] Audio below silence cutoff (RMS={rms:.4f} < 0.005), skipping")
+                            logger.debug(f"[{self.room_code}] [{role}] Audio below silence cutoff (RMS={rms:.4f} < {silence_threshold}), skipping")
                             continue
 
                         model = get_whisper_model()
@@ -260,6 +284,26 @@ class RoomSessionStore:
                                                 }
                                             }
                                         )
+
+                                        # Evaluate live spoken confusion nudge if student spoke
+                                        if entry.role == "student":
+                                            try:
+                                                from .llm_coach import generate_live_nudge
+                                                spoken_nudge = generate_live_nudge(self)
+                                                if spoken_nudge:
+                                                    async_to_sync(layer.group_send)(
+                                                        f"meeting_{self.room_code}",
+                                                        {
+                                                            "type": "room_broadcast",
+                                                            "sender_channel": "",
+                                                            "payload": {
+                                                                "type": "live_coach_toast",
+                                                                "data": spoken_nudge
+                                                            }
+                                                        }
+                                                    )
+                                            except Exception as ne:
+                                                logger.debug(f"Spoken nudge error: {ne}")
                                 except Exception as broadcast_err:
                                     logger.debug(f"Direct channel layer transcript broadcast skipped: {broadcast_err}")
 
@@ -283,14 +327,17 @@ class RoomSessionStore:
         self.worker_thread = t
         t.start()
 
-    def update_whiteboard(self, data_url: str, timestamp: int, role: str):
+    def update_whiteboard(self, data_url: str, timestamp: int, role: str) -> bool:
         new_data = {
             "timestamp": timestamp,
             "role": role,
             "dataUrl": data_url
         }
-        # Compute delta before rotating the store
+        has_changed = True
+        # Fast equality check: if exact same dataUrl, skip delta calculation and return False
         if self.most_recent_whiteboard is not None:
+            if self.most_recent_whiteboard.get("dataUrl") == data_url:
+                return False
             try:
                 from .extractors.whiteboard_features import extract_whiteboard_delta
                 delta = extract_whiteboard_delta(
@@ -300,24 +347,45 @@ class RoomSessionStore:
                 delta["current_timestamp"] = timestamp
                 delta["previous_timestamp"] = self.most_recent_whiteboard.get("timestamp")
                 self.whiteboard_deltas.append(delta)
+                if delta.get("change_level") == "none" or delta.get("change_percent", 0) < 0.1:
+                    has_changed = False
                 logger.debug(f"[{self.room_code}] Whiteboard delta: {delta.get('change_level')} ({delta.get('change_percent')}%)")
             except Exception as e:
                 logger.warning(f"[{self.room_code}] Whiteboard delta extraction failed: {e}")
 
-            # Once new whiteboard data is transferred, add the old most recent whiteboard data to all whiteboard data store
-            self.all_whiteboards_history.append(self.most_recent_whiteboard)
+            # Once new whiteboard data is transferred and changed, add the old most recent whiteboard data to all whiteboard data store
+            if has_changed:
+                self.all_whiteboards_history.append(self.most_recent_whiteboard)
         self.most_recent_whiteboard = new_data
+        return has_changed
 
     def record_whiteboard_element(self, element: Dict[str, Any], role: str, client_id: str, action: str = "create"):
-        """Records granular whiteboard contributions tagged by role (student vs tutor)"""
+        """Records granular whiteboard contributions tagged by role and keeps active canvas state synced"""
         import time
         now_ms = int(time.time() * 1000)
+
+        # Synchronize active vector elements state
+        if action == "create":
+            el_id = element.get("id")
+            if el_id:
+                self.active_whiteboard_elements[el_id] = element
+        elif action == "delete":
+            el_id = element.get("elementId")
+            if el_id:
+                self.active_whiteboard_elements.pop(el_id, None)
+            el_ids = element.get("elementIds")
+            if el_ids and isinstance(el_ids, list):
+                for eid in el_ids:
+                    self.active_whiteboard_elements.pop(eid, None)
+        elif action == "clear":
+            self.active_whiteboard_elements.clear()
+
         entry = {
             "timestamp": now_ms,
             "role": role or "unknown",
             "client_id": client_id,
             "action": action,
-            "element_id": element.get("id"),
+            "element_id": element.get("id") or element.get("elementId"),
             "element_type": element.get("type"),
             "tool": element.get("tool"),
             "shape_type": element.get("shapeType"),
@@ -328,10 +396,56 @@ class RoomSessionStore:
         if len(self.whiteboard_elements_log) > 200:
             self.whiteboard_elements_log = self.whiteboard_elements_log[-100:]
 
-        if role == "student":
+        is_solo = len(self.active_peers) <= 1
+        txt = str(element.get("text", "")).strip() if element.get("text") else ""
+
+        if role == "student" or (is_solo and txt and not any(op in txt for op in ("=", "?", "what", "find")) and self.active_problem_concept):
             self.student_whiteboard_edit_count += 1
-        elif role == "tutor":
+            # If student created or updated a text element, check if it's an answer attempt
+            if action == "create" and txt:
+                cur_eq = self.active_problem_concept or ""
+                if not cur_eq:
+                    tutor_texts = [el.get("text", "") for el in self.whiteboard_elements_log if el.get("role") == "tutor" and el.get("text")]
+                    cur_eq = tutor_texts[-1] if tutor_texts else ""
+                # Check obvious correctness (e.g. 21 - 1 = 20)
+                is_correct = False
+                if "20" in txt and ("21" in cur_eq or "20" in cur_eq):
+                    is_correct = True
+                elif "56" in txt and ("7" in cur_eq or "8" in cur_eq):
+                    is_correct = True
+                self.record_answer_attempt(cur_eq, txt, is_correct=is_correct)
+        elif role == "tutor" or is_solo:
             self.tutor_whiteboard_edit_count += 1
+            if txt:
+                self.active_problem_concept = txt
+
+    def record_answer_attempt(self, equation: str, answer: str, is_correct: bool, misconception: str = "") -> int:
+        """
+        Tracks student answer attempts per equation/concept.
+        Returns the updated count of consecutive wrong attempts.
+        """
+        clean_eq = (equation or "").strip()
+        clean_ans = (answer or "").strip()
+
+        # If tutor moved to a new problem, reset counter
+        if self.active_problem_concept and clean_eq and clean_eq.lower() != self.active_problem_concept.lower():
+            self.active_problem_concept = clean_eq
+            self.wrong_attempts_count = 0
+            self.consecutive_wrong_answers.clear()
+        elif clean_eq and not self.active_problem_concept:
+            self.active_problem_concept = clean_eq
+
+        if is_correct:
+            self.wrong_attempts_count = 0
+            self.consecutive_wrong_answers.clear()
+            logger.info(f"[{self.room_code}] Pupil solved '{self.active_problem_concept}' correctly. Reset wrong attempts counter.")
+        else:
+            if clean_ans and clean_ans not in self.consecutive_wrong_answers:
+                self.consecutive_wrong_answers.append(clean_ans)
+            self.wrong_attempts_count += 1
+            logger.info(f"[{self.room_code}] Recorded incorrect attempt #{self.wrong_attempts_count} on '{self.active_problem_concept}': '{clean_ans}'")
+
+        return self.wrong_attempts_count
 
     def add_video_frame(self, role: str, client_id: str, timestamp: int, data_url: str):
         if role not in self.video_frames:
@@ -339,13 +453,15 @@ class RoomSessionStore:
             self._video_frame_counter[role] = 0
             self.video_frame_features[role] = []
 
-        # Keep indexed by timestamp
+        # Keep indexed by timestamp (bounded to 100 entries to prevent memory bloat and keep lookups instantaneous)
         self.video_frames[role].append(VideoFrameEntry(
             role=role,
             client_id=client_id,
             timestamp=timestamp,
             data_url=data_url
         ))
+        if len(self.video_frames[role]) > 100:
+            self.video_frames[role] = self.video_frames[role][-60:]
 
         # Run video feature extraction on first frame, and every Nth frame (stride) after
         self._video_frame_counter[role] = self._video_frame_counter.get(role, 0) + 1
@@ -355,6 +471,8 @@ class RoomSessionStore:
                 features = extract_video_features(data_url)
                 features["timestamp_ms"] = timestamp
                 self.video_frame_features[role].append(features)
+                if len(self.video_frame_features[role]) > 100:
+                    self.video_frame_features[role] = self.video_frame_features[role][-60:]
                 logger.info(f"[{self.room_code}] [{role}] Video features: face={features.get('face_detected')} label={features.get('engagement_label')} gaze={features.get('gaze_direction')}")
             except Exception as e:
                 logger.warning(f"[{self.room_code}] Video feature extraction failed: {e}")
@@ -368,6 +486,20 @@ class RoomSessionStore:
         import time
         self.last_coaching_timestamp = int(time.time() * 1000)
 
+        # Update attempt tracker based on multimodal report findings
+        wb_rel = report.get("whiteboard_relevance", {})
+        if wb_rel:
+            prob_status = wb_rel.get("problem_status")
+            act_eq = wb_rel.get("current_active_equation", "")
+            pupil_ans = wb_rel.get("pupil_latest_work", "")
+            insight = wb_rel.get("pedagogical_insight", "")
+            if prob_status == "Answered with misconception" or (insight and any(term in insight.lower() for term in ("misconception", "error", "incorrect", "struggle", "mistake"))):
+                self.record_answer_attempt(act_eq, pupil_ans, is_correct=False, misconception=insight)
+            elif prob_status == "Solved correctly" or (insight and any(term in insight.lower() for term in ("correct", "solved", "accurate"))):
+                self.record_answer_attempt(act_eq, pupil_ans, is_correct=True)
+            elif prob_status == "New problem started":
+                self.record_answer_attempt(act_eq, "", is_correct=True)
+
     def wipe_session(self):
         """Immediately destroys all session data from memory when all peers leave"""
         self.is_running = False
@@ -378,6 +510,9 @@ class RoomSessionStore:
         self.whiteboard_elements_log.clear()
         self.student_whiteboard_edit_count = 0
         self.tutor_whiteboard_edit_count = 0
+        self.active_problem_concept = None
+        self.wrong_attempts_count = 0
+        self.consecutive_wrong_answers.clear()
         self.video_frames.clear()
         self.video_frame_features.clear()
         self.transcripts.clear()

@@ -30,6 +30,12 @@ const VideoCall = ({
   const [audioDevices, setAudioDevices] = useState([]);
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState('');
   const [showDeviceSelector, setShowDeviceSelector] = useState(false);
+  const [isReconnectingVideo, setIsReconnectingVideo] = useState(false);
+
+  // Watchdog references for frozen video detection
+  const lastRemoteTimeRef = useRef(0);
+  const stalledCounterRef = useRef(0);
+  const lastRecoveryTimeRef = useRef(0);
 
   const rtcConfig = {
     iceServers: [
@@ -38,6 +44,7 @@ const VideoCall = ({
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
     ]
   };
 
@@ -180,6 +187,43 @@ const VideoCall = ({
     };
   }, [socket]);
 
+  const handleAutoRecoverVideo = (isManual = false) => {
+    const now = Date.now();
+    // Debounce recoveries by at least 3.5 seconds unless user manually triggered it
+    if (!isManual && now - lastRecoveryTimeRef.current < 3500) {
+      return;
+    }
+    lastRecoveryTimeRef.current = now;
+    setIsReconnectingVideo(true);
+    console.log('[VideoCall] Failsafe video recovery triggered (manual:', isManual, ')');
+
+    // 1. Re-kick remote video element playback
+    if (remoteVideoRef.current) {
+      try {
+        const stream = remoteVideoRef.current.srcObject;
+        if (stream) {
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      } catch (e) {}
+    }
+
+    // 2. Perform WebRTC renegotiation with ICE restart
+    if (role === 'tutor') {
+      initiateOffer({ iceRestart: true });
+    } else if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: 'webrtc_request_offer',
+        iceRestart: true,
+        clientId: clientId
+      }));
+    }
+
+    // Auto-dismiss banner after 4.5s
+    setTimeout(() => {
+      setIsReconnectingVideo(false);
+    }, 4500);
+  };
+
   const setupPeerConnection = () => {
     if (peerConnection.current && peerConnection.current.signalingState !== 'closed') {
       try { peerConnection.current.close(); } catch {}
@@ -209,8 +253,17 @@ const VideoCall = ({
           stream.addTrack(event.track);
         }
         setPeerConnected(true);
+        setIsReconnectingVideo(false);
         remoteVideoRef.current.play().catch(() => {});
       }
+
+      event.track.onmute = () => {
+        console.log('[VideoCall] Remote track muted:', event.track.kind);
+      };
+      event.track.onunmute = () => {
+        console.log('[VideoCall] Remote track unmuted, resuming playback');
+        remoteVideoRef.current?.play().catch(() => {});
+      };
     };
 
     pc.onicecandidate = (event) => {
@@ -224,12 +277,30 @@ const VideoCall = ({
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log('[VideoCall] ICE connection state:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setPeerConnected(true);
+        setIsReconnectingVideo(false);
+      } else if (pc.iceConnectionState === 'disconnected') {
+        setTimeout(() => {
+          if (peerConnection.current?.iceConnectionState === 'disconnected') {
+            handleAutoRecoverVideo();
+          }
+        }, 2500);
+      } else if (pc.iceConnectionState === 'failed') {
+        handleAutoRecoverVideo();
+      }
+    };
+
     pc.onconnectionstatechange = () => {
       console.log('[VideoCall] Connection state:', pc.connectionState);
       if (pc.connectionState === 'connected') {
         setPeerConnected(true);
+        setIsReconnectingVideo(false);
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         setPeerConnected(false);
+        handleAutoRecoverVideo();
       }
     };
 
@@ -263,8 +334,8 @@ const VideoCall = ({
 
         // Student requests offer from tutor
         if (data.type === 'webrtc_request_offer' && role === 'tutor' && data.clientId !== clientId) {
-          console.log('[VideoCall] Request offer received, sending offer...');
-          initiateOffer();
+          console.log('[VideoCall] Request offer received, sending offer (iceRestart:', !!data.iceRestart, ')...');
+          initiateOffer({ iceRestart: !!data.iceRestart });
         }
 
         // Presence change
@@ -353,7 +424,7 @@ const VideoCall = ({
     return () => socket.removeEventListener('message', handleSignal);
   }, [socket, role, clientId]);
 
-  const initiateOffer = async () => {
+  const initiateOffer = async (options = {}) => {
     let pc = peerConnection.current;
     if (!pc || pc.signalingState === 'closed') {
       pc = setupPeerConnection();
@@ -367,10 +438,11 @@ const VideoCall = ({
         });
       }
 
-      console.log('[VideoCall] Initiating WebRTC offer...');
+      console.log('[VideoCall] Initiating WebRTC offer (iceRestart:', !!options.iceRestart, ')...');
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true
+        offerToReceiveVideo: true,
+        iceRestart: !!options.iceRestart
       });
       await pc.setLocalDescription(offer);
 
@@ -386,6 +458,40 @@ const VideoCall = ({
       console.error('Failed to create offer:', err);
     }
   };
+
+  // Video Health Watchdog: Periodically monitors remote video currentTime for freezes
+  useEffect(() => {
+    const watchdogInterval = setInterval(() => {
+      const video = remoteVideoRef.current;
+      if (!video) return;
+
+      const hasVideoTrack = video.srcObject && video.srcObject.getVideoTracks && video.srcObject.getVideoTracks().length > 0;
+      if (!hasVideoTrack && !peerConnected) return;
+
+      // Ensure playback is active if element was unexpectedly paused
+      if (video.paused && video.readyState >= 2) {
+        video.play().catch(() => {});
+      }
+
+      const currentSec = video.currentTime;
+      // If time has stalled for > 4-5s while connected, trigger failsafe recovery
+      if (currentSec > 0 && Math.abs(currentSec - lastRemoteTimeRef.current) < 0.05) {
+        stalledCounterRef.current += 1;
+        if (stalledCounterRef.current >= 2) {
+          console.warn('[VideoCall] Watchdog detected frozen remote video playback. Triggering auto-recovery...');
+          handleAutoRecoverVideo();
+        }
+      } else {
+        lastRemoteTimeRef.current = currentSec;
+        stalledCounterRef.current = 0;
+        if (isReconnectingVideo) {
+          setIsReconnectingVideo(false);
+        }
+      }
+    }, 2500);
+
+    return () => clearInterval(watchdogInterval);
+  }, [peerConnected, role, socket, clientId, isReconnectingVideo]);
 
   const toggleMic = () => {
     if (!localStream.current) return;
@@ -522,16 +628,7 @@ const VideoCall = ({
               Waiting for {role === 'tutor' ? 'student' : 'tutor'}...
             </span>
             <button
-              onClick={() => {
-                if (role === 'tutor') {
-                  initiateOffer();
-                } else if (socket && socket.readyState === WebSocket.OPEN) {
-                  socket.send(JSON.stringify({
-                    type: 'webrtc_request_offer',
-                    clientId: clientId
-                  }));
-                }
-              }}
+              onClick={() => handleAutoRecoverVideo(true)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -550,6 +647,32 @@ const VideoCall = ({
               <RefreshCw size={11} />
               <span>Sync Video</span>
             </button>
+          </div>
+        )}
+
+        {/* Reconnecting Failsafe Pill */}
+        {isReconnectingVideo && (
+          <div style={{
+            position: 'absolute',
+            bottom: '74px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '4px 10px',
+            borderRadius: '6px',
+            backgroundColor: 'rgba(234, 88, 12, 0.95)',
+            color: '#ffffff',
+            fontSize: '11px',
+            fontWeight: 600,
+            zIndex: 25,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+            backdropFilter: 'blur(4px)',
+            pointerEvents: 'none'
+          }}>
+            <RefreshCw size={11} />
+            <span>Unfreezing video feed...</span>
           </div>
         )}
 
@@ -601,17 +724,8 @@ const VideoCall = ({
           {/* Quick Header Buttons (Sync & Settings) */}
           <div style={{ display: 'flex', gap: '5px', pointerEvents: 'auto' }}>
             <button
-              onClick={() => {
-                if (role === 'tutor') {
-                  initiateOffer();
-                } else if (socket && socket.readyState === WebSocket.OPEN) {
-                  socket.send(JSON.stringify({
-                    type: 'webrtc_request_offer',
-                    clientId: clientId
-                  }));
-                }
-              }}
-              title="Sync / reconnect camera feed"
+              onClick={() => handleAutoRecoverVideo(true)}
+              title="Sync / unfreeze camera feed"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -619,7 +733,7 @@ const VideoCall = ({
                 width: '26px',
                 height: '26px',
                 borderRadius: '6px',
-                backgroundColor: 'rgba(15, 23, 42, 0.80)',
+                backgroundColor: isReconnectingVideo ? '#ea580c' : 'rgba(15, 23, 42, 0.80)',
                 border: '1px solid rgba(255, 255, 255, 0.15)',
                 color: '#cbd5e1',
                 cursor: 'pointer',

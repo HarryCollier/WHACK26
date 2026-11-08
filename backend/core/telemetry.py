@@ -283,7 +283,7 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
     lines.append(f"  Student edits   : {ws.get('student_edits', 0)}")
     lines.append(f"  Tutor edits     : {ws.get('tutor_edits', 0)}")
     if ws.get("current_data_url"):
-        lines.append("  Visual Status   : [Whiteboard snapshot image is attached. COLOR CODING: Black=Tutor prompts/questions, Green=Pupil answers/work. Attribute questions to tutor and answers to pupil.]")
+        lines.append("  Visual Status   : [Whiteboard snapshot image is attached, auto-framed on the active problem. COLOR CODING: Black=Tutor prompts/questions, Green=Pupil answers/work. Attribute questions to tutor and answers to pupil.]")
     summ = ws.get("summary", {})
     lines.append(f"  Major edits     : {summ.get('major_edits', 0)}")
     lines.append(f"  Idle snapshots  : {summ.get('idle_snapshots', 0)}")
@@ -319,10 +319,14 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
 
 def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) -> dict:
     """
-    Computes a deterministic, real-time engagement indicator for the tutor
-    based on the student's telemetry over the last `window_seconds`.
+    Computes a deterministic, real-time engagement indicator and rolling mode
+    facial expression for the tutor based on video telemetry.
     """
     student_frames = store.video_frame_features.get("student", [])
+    # Solo / testing fallback: if no student frames yet, use tutor frames so testing works in 1 browser
+    if not student_frames and store.video_frame_features.get("tutor"):
+        student_frames = store.video_frame_features.get("tutor", [])
+
     now_ms = int(time.time() * 1000)
 
     # 1. Filter frames in the recent window
@@ -339,12 +343,19 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
     faces = [f for f in recent_frames if f.get("face_detected")]
 
     if not recent_frames or not faces:
-        has_raw_frames = len(store.video_frames.get("student", [])) > 0
+        has_raw_frames = len(store.video_frames.get("student", [])) > 0 or len(store.video_frames.get("tutor", [])) > 0
         return {
             "engagement_score": 0,
             "status_label": "No Student Face Detected" if has_raw_frames else "Waiting for Student Video",
             "status_color": "gray",
             "attention_state": "no_face",
+            "mode_expression": "no_face",
+            "mode_color": "gray",
+            "mode_label": "No Face Detected",
+            "mode_frequency_pct": 0,
+            "instant_expression": "no_face",
+            "instant_color": "gray",
+            "instant_label": "No Face",
             "student_face_detected": False,
             "has_raw_frames": has_raw_frames,
             "brow_furrow_level": 0.0,
@@ -360,48 +371,117 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
     furrows = [f.get("brow_furrow_score", 0) for f in faces]
     avg_furrow = _safe_mean(furrows) or 0.0
 
-    # Count attention states
-    confused_count = sum(1 for f in faces if f.get("attention_state") in ("confused", "confused_furrow") or f.get("brow_furrow_score", 0) > 0.40)
-    away_count = sum(1 for f in faces if f.get("gaze_direction") not in ("screen", "forward", "unknown") and not f.get("eye_contact", True))
+    # 3. Categorize individual facial expressions for mode calculation
+    # Categories: "confused" | "engaged" | "distracted" | "listening"
+    expression_counts = {"confused": 0, "engaged": 0, "distracted": 0, "listening": 0}
+    for f in faces:
+        att = f.get("attention_state", "")
+        furrow = f.get("brow_furrow_score", 0.0)
+        smile = f.get("smile_score", 0.0)
+        gaze = f.get("gaze_direction", "forward")
+        eye_contact = f.get("eye_contact", True)
 
-    pct_confused = confused_count / len(faces)
-    pct_away = away_count / len(faces)
+        if furrow > 0.35 or att in ("confused", "confused_furrow"):
+            expression_counts["confused"] += 1
+        elif smile > 0.25 or att == "engaged_happy":
+            expression_counts["engaged"] += 1
+        elif gaze not in ("screen", "forward", "unknown") and not eye_contact:
+            expression_counts["distracted"] += 1
+        else:
+            expression_counts["listening"] += 1
 
-    recent_gaze = faces[-1].get("gaze_direction", "forward")
+    # Statistical Mode: most frequent expression over the window
+    mode_expression = max(expression_counts, key=expression_counts.get)
+    mode_frequency_pct = round(100.0 * expression_counts[mode_expression] / len(faces)) if faces else 0
 
-    # Check recent student whiteboard participation
-    student_wb_edits = getattr(store, "student_whiteboard_edit_count", 0)
-    recent_wb_elements = getattr(store, "whiteboard_elements_log", [])
+    mode_metadata = {
+        "confused": {
+            "color": "red",
+            "label": "Confused (Brow Furrow)",
+            "description": "Student showing brow furrow / puzzlement"
+        },
+        "engaged": {
+            "color": "green",
+            "label": "Engaged & Attentive",
+            "description": "Attentive, smiling, focused on lesson"
+        },
+        "distracted": {
+            "color": "yellow",
+            "label": "Looking Away",
+            "description": "Gaze off-screen / looking away"
+        },
+        "listening": {
+            "color": "blue",
+            "label": "Listening / Neutral",
+            "description": "Calm, neutral listening posture"
+        }
+    }.get(mode_expression, {
+        "color": "blue",
+        "label": "Listening / Neutral",
+        "description": "Calm listening state"
+    })
+
+    # 4. Instantaneous expression (latest frame) for zero-lag reactivity
+    latest_face = faces[-1]
+    latest_furrow = latest_face.get("brow_furrow_score", 0.0)
+    latest_smile = latest_face.get("smile_score", 0.0)
+    latest_gaze = latest_face.get("gaze_direction", "forward")
+    latest_contact = latest_face.get("eye_contact", True)
+    latest_att = latest_face.get("attention_state", "")
+
+    if latest_furrow >= 0.35 or latest_att in ("confused", "confused_furrow"):
+        instant_expression = "confused"
+        instant_color = "red"
+        instant_label = "Confused / Brow Furrow"
+    elif latest_smile >= 0.25 or latest_att == "engaged_happy":
+        instant_expression = "engaged"
+        instant_color = "green"
+        instant_label = "Engaged & Smiling"
+    elif latest_gaze not in ("screen", "forward", "unknown") and not latest_contact:
+        instant_expression = "distracted"
+        instant_color = "yellow"
+        instant_label = "Looking Away"
+    else:
+        instant_expression = "listening"
+        instant_color = "blue"
+        instant_label = "Listening / Neutral"
+
+    # Fast-attack priority for current status:
+    # If the student is actively frowning right now (instant red), don't let 10s of old neutral frames suppress it!
+    # If student is actively writing on whiteboard, highlight that.
     recent_student_actions = [
-        el for el in recent_wb_elements
+        el for el in getattr(store, "whiteboard_elements_log", [])
         if el.get("role") == "student" and (now_ms - el.get("timestamp", 0)) <= window_seconds * 1000
     ]
+    student_wb_edits = getattr(store, "student_whiteboard_edit_count", 0)
 
-    # Determine status & badge
-    if len(recent_student_actions) > 0:
-        status_label = "Student Writing on Whiteboard"
-        status_color = "green"
-        attention_state = "attentive"
-        hint = "Pupil is actively contributing to the whiteboard in response to the session."
-    elif pct_confused >= 0.35 or avg_furrow > 0.45:
+    student_wb_active = len(recent_student_actions) > 0
+
+    # Fast attack priority: Instantaneous facial expression changes reflect immediately with zero lag!
+    if instant_expression == "confused" or expression_counts["confused"] / len(faces) >= 0.20 or avg_furrow > 0.35:
         status_label = "Student May Be Confused"
         status_color = "red"
         attention_state = "confused"
-        hint = "Elevated brow furrow detected. Pause and ask a check-in question."
-    elif pct_away >= 0.45 or avg_score < 0.40:
+        hint = "Elevated brow furrow detected. Check in or offer a stepping stone."
+    elif instant_expression == "distracted" and (expression_counts["distracted"] / len(faces) >= 0.25 or avg_score < 0.40):
         status_label = "Student Looking Away"
         status_color = "yellow"
         attention_state = "distracted"
         hint = "Student attention is off-screen. Prompt them to engage with the whiteboard."
-    elif avg_score >= 0.65:
+    elif instant_expression == "engaged" or avg_score >= 0.65:
         status_label = "Attentive & Engaged"
         status_color = "green"
         attention_state = "attentive"
         hint = "Student is focused on the screen. Great pacing."
+    elif student_wb_active:
+        status_label = "Student Writing on Whiteboard"
+        status_color = "green"
+        attention_state = "attentive"
+        hint = "Pupil is actively contributing to the whiteboard in response to the session."
     else:
-        status_label = "Moderate Attention"
-        status_color = "yellow"
-        attention_state = "moderate"
+        status_label = "Listening / Neutral"
+        status_color = "blue"
+        attention_state = "listening"
         hint = "Ask an open-ended question to boost participation."
 
     return {
@@ -409,10 +489,20 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         "status_label": status_label,
         "status_color": status_color,
         "attention_state": attention_state,
+        # Rolling Mode Expression (Statistical Mode over window)
+        "mode_expression": mode_expression,
+        "mode_color": mode_metadata["color"],
+        "mode_label": mode_metadata["label"],
+        "mode_description": mode_metadata["description"],
+        "mode_frequency_pct": mode_frequency_pct,
+        # Instantaneous expression (zero-lag reaction)
+        "instant_expression": instant_expression,
+        "instant_color": instant_color,
+        "instant_label": instant_label,
         "student_face_detected": True,
         "has_raw_frames": True,
         "brow_furrow_level": round(avg_furrow, 2),
-        "gaze_direction": recent_gaze,
+        "gaze_direction": latest_gaze,
         "student_wb_active": len(recent_student_actions) > 0,
         "student_total_wb_edits": student_wb_edits,
         "actionable_hint": hint,
