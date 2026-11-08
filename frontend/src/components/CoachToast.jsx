@@ -147,8 +147,8 @@ export default function CoachToast({
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
         {/* Primary Action Button: Drop on Board */}
         <button
-          onClick={() => onApplyExample(toast.example_type || 'fraction_pizza')}
-          title="Draw example directly on whiteboard canvas"
+          onClick={() => onApplyExample(toast.example_type || 'fraction_pizza', toast)}
+          title="Draw example directly on whiteboard canvas as a draggable card"
           style={{
             display: 'flex',
             alignItems: 'center',
