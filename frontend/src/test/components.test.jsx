@@ -4,6 +4,7 @@ import React from 'react';
 import Lobby from '../components/Lobby';
 import Whiteboard from '../components/Whiteboard';
 import AICoachPanel, { LiveEngagementBadge } from '../components/AICoachPanel';
+import CoachNotebook from '../components/CoachNotebook';
 import { STREAM_CONFIG } from '../config/streamConfig';
 
 describe('STREAM_CONFIG', () => {
@@ -142,5 +143,39 @@ describe('AI Coach & Engagement Components', () => {
       expect(screen.getByText(/88\/100/i)).toBeInTheDocument();
       expect(screen.getByText(/Talk-Time Split/i)).toBeInTheDocument();
     });
+  });
+
+  it('renders CoachNotebook with exactly 2 positives, 2 negatives, and 2m sync badge', () => {
+    const handleApply = vi.fn();
+    const mockNotes = {
+      positives: [
+        'Positive 1: High student attentiveness during calculation.',
+        'Positive 2: Balanced turn taking between tutor and student.'
+      ],
+      negatives: [
+        'Negative 1: Brow furrow confusion detected on multi-step fraction.',
+        'Negative 2: Extend wait time after asking questions to 4 seconds.'
+      ],
+      lastUpdated: Date.now() - 30000
+    };
+
+    render(
+      <CoachNotebook
+        isOpen={true}
+        onToggle={vi.fn()}
+        coachNotes={mockNotes}
+        onApplyExample={handleApply}
+      />
+    );
+
+    expect(screen.getByText(/Live Coach Notes/i)).toBeInTheDocument();
+    expect(screen.getByText(/2m Sync/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 Positives \(What's Going Well\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Positive 1: High student attentiveness/i)).toBeInTheDocument();
+    expect(screen.getByText(/Positive 2: Balanced turn taking/i)).toBeInTheDocument();
+
+    expect(screen.getByText(/2 Areas to Improve \(Needs Attention\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Negative 1: Brow furrow confusion/i)).toBeInTheDocument();
+    expect(screen.getByText(/Negative 2: Extend wait time/i)).toBeInTheDocument();
   });
 });

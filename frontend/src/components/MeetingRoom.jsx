@@ -38,6 +38,19 @@ const MeetingRoom = ({ session, onLeave }) => {
   ]);
   const [isNotebookOpen, setIsNotebookOpen] = useState(false);
 
+  // Live Coach Notes: Exactly 2 Positives & 2 Negatives (synced on 2-minute cadence)
+  const [coachNotes, setCoachNotes] = useState({
+    positives: [
+      'Balanced conversational pacing, leaving healthy space for student responses.',
+      'Whiteboard workspace actively initialized for collaborative problem solving.'
+    ],
+    negatives: [
+      'Ensure wait time of 3–5 seconds after asking questions to allow student to process.',
+      'Prompt student to write down their intermediate work on the whiteboard canvas.'
+    ],
+    lastUpdated: Date.now()
+  });
+
   // Picture-in-Picture window position & collapse state
   // Starts in top-left (16, 56) while MovableStudentFaceWidget starts in top-right
   const [pipPos, setPipPos] = useState({ x: 16, y: 56 });
@@ -122,6 +135,13 @@ const MeetingRoom = ({ session, onLeave }) => {
             }
           } else if (data.type === 'coaching_report_updated' && data.data) {
             const rep = data.data;
+            if (role === 'tutor' && rep.coach_notes) {
+              setCoachNotes({
+                positives: Array.isArray(rep.coach_notes.positives) ? rep.coach_notes.positives.slice(0, 2) : [],
+                negatives: Array.isArray(rep.coach_notes.negatives) ? rep.coach_notes.negatives.slice(0, 2) : [],
+                lastUpdated: Date.now()
+              });
+            }
             if (role === 'tutor' && rep.whiteboard_relevance) {
               const rel = rep.whiteboard_relevance;
               const insightText = rel.acknowledgment || rel.pedagogical_insight;
@@ -200,7 +220,7 @@ const MeetingRoom = ({ session, onLeave }) => {
         wbSnapshot = whiteboardRef.current.getSnapshot();
       }
 
-      await fetch(`${apiBase}/api/rooms/${roomCode}/coach/`, {
+      const res = await fetch(`${apiBase}/api/rooms/${roomCode}/coach/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -209,6 +229,16 @@ const MeetingRoom = ({ session, onLeave }) => {
           whiteboardSnapshot: wbSnapshot
         })
       });
+      if (res.ok) {
+        const rep = await res.json();
+        if (rep?.coach_notes) {
+          setCoachNotes({
+            positives: Array.isArray(rep.coach_notes.positives) ? rep.coach_notes.positives.slice(0, 2) : [],
+            negatives: Array.isArray(rep.coach_notes.negatives) ? rep.coach_notes.negatives.slice(0, 2) : [],
+            lastUpdated: Date.now()
+          });
+        }
+      }
       studentEditsSinceLastEval.current = 0;
       lastAdaptiveEvalTime.current = Date.now();
     } catch (err) {
@@ -250,14 +280,20 @@ const MeetingRoom = ({ session, onLeave }) => {
 
     socket.addEventListener('message', handleMessage);
 
-    // Regular 90-second cadence
+    // Initial evaluation 3 seconds after room load to prime Coach Notes
+    const initialTimer = setTimeout(() => {
+      maybeEvaluate('initial_eval');
+    }, 3000);
+
+    // Regular 2-minute cadence (120 seconds) for real-time Coach Notes
     const interval = setInterval(() => {
       maybeEvaluate('cadence_interval');
-    }, 90000);
+    }, 120000);
 
     return () => {
       socket.removeEventListener('message', handleMessage);
       if (studentWriteDebounce.current) clearTimeout(studentWriteDebounce.current);
+      clearTimeout(initialTimer);
       clearInterval(interval);
     };
   }, [role, socket, roomCode]);
@@ -763,10 +799,7 @@ const MeetingRoom = ({ session, onLeave }) => {
             isOpen={isNotebookOpen}
             onToggle={() => setIsNotebookOpen(prev => !prev)}
             entries={notebookEntries}
-            topTakeaways={[
-              'Fractions division: Favor visual representations (pizza, number line).',
-              'Student recovers quickly when given a concrete example first.'
-            ]}
+            coachNotes={coachNotes}
             onApplyExample={handleApplyExample}
             onOpenFullReport={() => {
               setIsNotebookOpen(false);

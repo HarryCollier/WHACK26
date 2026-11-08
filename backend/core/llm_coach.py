@@ -147,7 +147,17 @@ You MUST respond ONLY with a valid JSON object matching this exact schema:
   "actionable_tips": [
     "Tip 1 for immediate tutor action",
     "Tip 2 for immediate tutor action"
-  ]
+  ],
+  "coach_notes": {
+    "positives": [
+      "1 specific sentence highlighting what is going well in the session (e.g. good wait time, student engaged on board, clear conceptual step)",
+      "A 2nd specific sentence highlighting another positive aspect of the lesson"
+    ],
+    "negatives": [
+      "1 specific sentence identifying a constructive friction point or area to improve (e.g. student furrowed brow on step 2, talk time imbalance, unaddressed misconception)",
+      "A 2nd specific sentence identifying another friction point or misconception needing attention"
+    ]
+  }
 }
 """
 
@@ -226,6 +236,29 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
     if not report.get("whiteboard_relevance") or not isinstance(report.get("whiteboard_relevance"), dict):
         heuristic = _generate_heuristic_report(telemetry_payload)
         report["whiteboard_relevance"] = heuristic.get("whiteboard_relevance", {})
+
+    # Guarantee coach_notes exists with exactly 2 positives and 2 negatives
+    cn = report.get("coach_notes")
+    if not cn or not isinstance(cn, dict) or not isinstance(cn.get("positives"), list) or not isinstance(cn.get("negatives"), list):
+        heuristic = _generate_heuristic_report(telemetry_payload)
+        report["coach_notes"] = heuristic.get("coach_notes", {"positives": [], "negatives": []})
+    else:
+        heuristic = None
+        pos = [str(p).strip() for p in cn.get("positives", []) if str(p).strip()]
+        neg = [str(n).strip() for n in cn.get("negatives", []) if str(n).strip()]
+        if len(pos) < 2 or len(neg) < 2:
+            heuristic = _generate_heuristic_report(telemetry_payload)
+            h_cn = heuristic.get("coach_notes", {})
+            for h_p in h_cn.get("positives", []):
+                if len(pos) < 2 and h_p not in pos:
+                    pos.append(h_p)
+            for h_n in h_cn.get("negatives", []):
+                if len(neg) < 2 and h_n not in neg:
+                    neg.append(h_n)
+        report["coach_notes"] = {
+            "positives": pos[:2],
+            "negatives": neg[:2]
+        }
 
     report = _clean_report_math(report)
     report["provider_used"] = provider_used
@@ -544,6 +577,59 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
     if tutor_pct > 70:
         actionable_tips.insert(0, "Increase wait time after asking questions to 4–5 seconds.")
 
+    # 5. Coach Notes: Exactly 2 Positives & 2 Negatives (Updated dynamically every evaluation)
+    positives = []
+    negatives = []
+
+    # Positives evaluation
+    if pacing_status == "Balanced":
+        positives.append(f"Balanced conversational pacing ({tutor_pct}% tutor / {student_pct}% student), leaving healthy space for student responses.")
+    elif student_pct >= 40:
+        positives.append(f"Strong student verbal participation ({student_pct}% of total talk-time).")
+    else:
+        positives.append("Tutor provides structured, clear explanations of core concepts.")
+
+    if student_edits > 0:
+        positives.append(f"Collaborative whiteboard engagement: student contributed {student_edits} active visual/calculation edits.")
+    elif student_eng_avg >= 0.70 and student_furrow < 0.25:
+        positives.append(f"High student visual engagement ({int(student_eng_avg * 100)}% attention score) with steady eye focus on the board.")
+    elif total_wb_changes > 0:
+        positives.append("Whiteboard actively anchored as a collaborative visual workspace.")
+    else:
+        positives.append("Positive teacher-student presence maintained in the session.")
+
+    # Guarantee exactly 2 distinct positive notes
+    if len(positives) < 2:
+        positives.append("Pacing allows student time to absorb instructions before solving.")
+    positives = positives[:2]
+
+    # Negatives / Friction Points evaluation
+    if tutor_pct > 70:
+        negatives.append(f"Pacing is tutor-heavy ({tutor_pct}% talk-time). Extend wait time to 4–5 seconds after asking questions.")
+    elif student_pct > 75:
+        negatives.append("Student is leading without much scaffolding; step in with structured checks to anchor accuracy.")
+
+    if wb_relevance.get("problem_status") == "Answered with misconception":
+        negatives.append(f"Student encountered misconception on '{cur_eq or 'board problem'}'; offer a stepping-stone anchor before advancing.")
+    elif friction_points:
+        negatives.append(friction_points[0].get("observation") or "Student appeared momentarily puzzled or hesitant during explanation.")
+    elif student_edits == 0:
+        negatives.append("Whiteboard is tutor-only so far; invite student to write down their intermediate steps.")
+    elif student_furrow > 0.35:
+        negatives.append("Student showed facial signs of confusion (brow furrow); check in with an open-ended clarification.")
+    else:
+        negatives.append("Limited checks for understanding; prompt student to explain their reasoning in their own words.")
+
+    # Guarantee exactly 2 distinct negative notes
+    if len(negatives) < 2:
+        negatives.append("Awaiting pupil to externalize their problem-solving steps on the whiteboard.")
+    negatives = negatives[:2]
+
+    coach_notes = {
+        "positives": positives,
+        "negatives": negatives
+    }
+
     return {
         "summary": summary,
         "comprehension_rating": comprehension_rating,
@@ -557,7 +643,8 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
         "whiteboard_relevance": wb_relevance,
         "friction_points": friction_points,
         "whiteboard_feedback": wb_feedback,
-        "actionable_tips": actionable_tips
+        "actionable_tips": actionable_tips,
+        "coach_notes": coach_notes
     }
 
 

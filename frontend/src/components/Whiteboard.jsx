@@ -2768,7 +2768,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
                 setTool(prevTool || 'pen');
               }
             }}
-            title="Moving Object Mode (Hand - Drag & Drop Content / Pan)"
+            title="Moving Object Mode (Hand (Pan Board) - Drag & Drop Content / Pan)"
             style={{
               padding: '5px 8px',
               borderRadius: '6px',
