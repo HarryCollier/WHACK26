@@ -407,9 +407,9 @@ const MeetingRoom = ({ session, onLeave }) => {
     }
   };
 
-  const handleApplyExample = (examplePayload) => {
+  const handleApplyExample = (examplePayload, toastData) => {
     if (whiteboardRef.current?.insertVisualExample) {
-      whiteboardRef.current.insertVisualExample(examplePayload || 'number_line_hop');
+      whiteboardRef.current.insertVisualExample(examplePayload || 'fraction_pizza', toastData);
     }
     setActiveToast(null);
   };
@@ -767,6 +767,7 @@ const MeetingRoom = ({ session, onLeave }) => {
               'Fractions division: Favor visual representations (pizza, number line).',
               'Student recovers quickly when given a concrete example first.'
             ]}
+            onApplyExample={handleApplyExample}
             onOpenFullReport={() => {
               setIsNotebookOpen(false);
               setShowAICoach(true);

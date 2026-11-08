@@ -608,680 +608,481 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     }
   };
 
-  // Expose snapshot extraction and recentering handles to parent
+  // Insert generated content as an interactive, drag-and-droppable card box
+  const insertGeneratedContent = ({ elements, width, height, position, title, summary }) => {
+    if (!Array.isArray(elements) || elements.length === 0) return [];
+
+      const canvas = canvasRef.current;
+      const rect = canvas ? canvas.getBoundingClientRect() : { width: 960, height: 600 };
+      const curPan = panRef.current;
+      const curZoom = zoomRef.current;
+
+    const viewportCenterX = (rect.width / 2 - curPan.x) / curZoom;
+    const viewportCenterY = (rect.height / 2 - curPan.y) / curZoom;
+
+    const boxW = width || 540;
+    const boxH = height || 360;
+    const originX = position ? position.x : Math.round(viewportCenterX - boxW / 2);
+    const originY = position ? position.y : Math.round(viewportCenterY - boxH / 2);
+
+    const now = Date.now();
+    const cardId = `card_box_${now}_${Math.random().toString(36).substr(2, 6)}`;
+    const cardTitle = title || '✨ AI Whiteboard Exercise';
+
+    // Find if an element is the card background rectangle
+    const bgIdx = elements.findIndex(el =>
+      el.type === 'shape' && el.shapeType === 'rectangle' &&
+      (el.start?.x ?? 0) <= 10 && (el.start?.y ?? 0) <= 10 &&
+      (el.end?.x ?? 0) >= boxW - 50
+    );
+
+    const preparedElements = [];
+
+    // Add Card Box container
+    if (bgIdx !== -1) {
+      const bgItem = elements[bgIdx];
+      preparedElements.push({
+        ...bgItem,
+        id: bgItem.id || `${cardId}_bg`,
+        cardId,
+        isCardBox: true,
+        cardTitle,
+        cardSummary: summary || '',
+        start: {
+          x: originX,
+          y: originY
+        },
+        end: {
+          x: originX + boxW,
+          y: originY + boxH
+        },
+        color: bgItem.color || '#cbd5e1',
+        fillColor: bgItem.fillColor || '#ffffff',
+        size: 2,
+        role,
+        clientId
+      });
+    } else {
+      preparedElements.push({
+        id: `${cardId}_bg`,
+        type: 'shape',
+        shapeType: 'rectangle',
+        cardId,
+        isCardBox: true,
+        cardTitle,
+        cardSummary: summary || '',
+        start: {
+          x: originX,
+          y: originY
+        },
+        end: {
+          x: originX + boxW,
+          y: originY + boxH
+        },
+        color: '#cbd5e1',
+        fillColor: '#ffffff',
+        size: 2,
+        role,
+        clientId
+      });
+    }
+
+    // Add child elements
+    elements.forEach((item, index) => {
+      if (index === bgIdx) return;
+      const id = item.id || `ai_el_${now}_${index}`;
+      if (item.type === 'shape') {
+        preparedElements.push({
+          ...item,
+          id,
+          cardId,
+          start: {
+            x: originX + (item.start?.x ?? 0),
+            y: originY + (item.start?.y ?? 0)
+          },
+          end: {
+            x: originX + (item.end?.x ?? 0),
+            y: originY + (item.end?.y ?? 0)
+          },
+          role,
+          clientId
+        });
+      } else if (item.type === 'text') {
+        preparedElements.push({
+          ...item,
+          id,
+          cardId,
+          x: originX + (item.x ?? 0),
+          y: originY + (item.y ?? 0),
+          maxWidth: item.maxWidth || Math.max(260, boxW - (item.x ?? 0) - 20),
+          role,
+          clientId
+        });
+      } else {
+        preparedElements.push({ ...item, id, cardId, role, clientId });
+      }
+    });
+
+    for (const el of preparedElements) {
+      elementsRef.current.push(el);
+      undoStackRef.current.push({ type: 'add', element: el });
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'whiteboard_element',
+          element: el,
+          role,
+          clientId
+        }));
+      }
+    }
+
+    // Automatically switch to moving object mode so the tutor can immediately drag and drop
+    setPrevTool(tool);
+    setTool('move');
+
+      updateHistoryState();
+      redrawAll();
+      return preparedElements;
+  };
+
+  // Insert pedagogical nudge visual example / hint / solution in draggable card box format
+  const insertVisualExample = (exampleType = 'fraction_pizza', toastData = null) => {
+    const normType = String(exampleType || '').toLowerCase();
+    let cardTitle = '💡 Pedagogical Guidance';
+    let cardSummary = '';
+    let boxW = 500;
+    let boxH = 320;
+    const items = [];
+
+    if (normType.includes('number_line')) {
+      cardTitle = '📏 Number Line Model';
+      cardSummary = '2 jumps of 1/4 reach 1/2';
+      boxW = 520;
+      boxH = 290;
+
+      // Axis arrow
+      items.push({
+        type: 'shape',
+        shapeType: 'arrow',
+        start: { x: 50, y: 155 },
+        end: { x: 470, y: 155 },
+        color: '#2563eb',
+        size: 3
+      });
+
+      // Ticks and labels
+      const ticks = [
+        { dx: 70, lbl: '0' },
+        { dx: 160, lbl: '1/4' },
+        { dx: 250, lbl: '1/2' },
+        { dx: 340, lbl: '3/4' },
+        { dx: 430, lbl: '1' }
+      ];
+      ticks.forEach((t) => {
+        items.push({
+          type: 'shape',
+          shapeType: 'line',
+          start: { x: t.dx, y: 143 },
+          end: { x: t.dx, y: 167 },
+          color: '#1e293b',
+          size: 2
+        });
+        items.push({
+          type: 'text',
+          text: t.lbl,
+          x: t.dx - 10,
+          y: 190,
+          color: '#1e293b',
+          fontSize: 14
+        });
+      });
+
+      // Hop arrows
+      items.push({
+        type: 'shape',
+        shapeType: 'arrow',
+        start: { x: 75, y: 130 },
+        end: { x: 155, y: 130 },
+        color: '#059669',
+        size: 2
+      });
+      items.push({
+        type: 'text',
+        text: '+1/4 (Hop 1)',
+        x: 85,
+        y: 120,
+        color: '#059669',
+        fontSize: 12,
+        fontWeight: 'bold'
+      });
+
+      items.push({
+        type: 'shape',
+        shapeType: 'arrow',
+        start: { x: 165, y: 130 },
+        end: { x: 245, y: 130 },
+        color: '#059669',
+        size: 2
+      });
+      items.push({
+        type: 'text',
+        text: '+1/4 (Hop 2)',
+        x: 175,
+        y: 120,
+        color: '#059669',
+        fontSize: 12,
+        fontWeight: 'bold'
+      });
+
+      // Prompt and Solution Box
+      items.push({
+        type: 'text',
+        text: 'Target: How many 1/4 hops to reach 1/2?',
+        x: 50,
+        y: 80,
+        color: '#1e3a8a',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 50, y: 215 },
+        end: { x: 470, y: 265 },
+        color: '#059669',
+        fillColor: '#ecfdf5',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: 'Answer: 2 hops of 1/4 reach 1/2  ->  1/2 ÷ 1/4 = 2',
+        x: 70,
+        y: 246,
+        color: '#059669',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+
+    } else if (normType.includes('subtraction')) {
+      cardTitle = '🧮 Subtraction Place Value Scaffold';
+      cardSummary = 'Column alignment with borrowing regrouping step';
+      boxW = 490;
+      boxH = 320;
+
+      // Column Headers
+      items.push({
+        type: 'text',
+        text: 'Tens (T)',
+        x: 80,
+        y: 85,
+        color: '#64748b',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+      items.push({
+        type: 'text',
+        text: 'Ones (O)',
+        x: 155,
+        y: 85,
+        color: '#64748b',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+
+      // Minuend & Subtrahend
+      items.push({ type: 'text', text: '5', x: 95, y: 125, color: '#0f172a', fontSize: 20 });
+      items.push({ type: 'text', text: '2', x: 170, y: 125, color: '#0f172a', fontSize: 20 });
+      items.push({ type: 'text', text: '-', x: 50, y: 165, color: '#0f172a', fontSize: 22, fontWeight: 'bold' });
+      items.push({ type: 'text', text: '2', x: 95, y: 165, color: '#0f172a', fontSize: 20 });
+      items.push({ type: 'text', text: '7', x: 170, y: 165, color: '#0f172a', fontSize: 20 });
+
+      // Line
+      items.push({
+        type: 'shape',
+        shapeType: 'line',
+        start: { x: 45, y: 180 },
+        end: { x: 205, y: 180 },
+        color: '#0f172a',
+        size: 2
+      });
+
+      // Borrowing notes
+      items.push({ type: 'text', text: '4', x: 95, y: 104, color: '#dc2626', fontSize: 13, fontWeight: 'bold' });
+      items.push({ type: 'text', text: '12', x: 165, y: 104, color: '#dc2626', fontSize: 13, fontWeight: 'bold' });
+
+      // Pedagogical Explanation
+      items.push({ type: 'text', text: '1. Ones: 2 < 7 -> Regroup 1 Ten into 10 Ones', x: 230, y: 100, color: '#dc2626', fontSize: 12.5 });
+      items.push({ type: 'text', text: '2. Subtract ones: 12 - 7 = 5', x: 230, y: 130, color: '#1e293b', fontSize: 12.5 });
+      items.push({ type: 'text', text: '3. Subtract tens: 4 - 2 = 2', x: 230, y: 160, color: '#1e293b', fontSize: 12.5 });
+
+      // Solution Answer Box
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 45, y: 235 },
+        end: { x: 455, y: 285 },
+        color: '#059669',
+        fillColor: '#ecfdf5',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: 'Scaffolded Solution: 52 - 27 = 25',
+        x: 65,
+        y: 266,
+        color: '#059669',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+
+    } else if (normType.includes('pizza') || normType.includes('fraction')) {
+      cardTitle = '🍕 Visual Fraction Model: 1/2 ÷ 1/4 = 2';
+      cardSummary = 'How many 1/4 slices fit in 1/2 pizza?';
+      boxW = 500;
+      boxH = 320;
+
+      // Pizza crust circle
+      items.push({
+        type: 'shape',
+        shapeType: 'circle',
+        start: { x: 50, y: 100 },
+        end: { x: 200, y: 250 },
+        color: '#d97706',
+        fillColor: '#fef3c7',
+        size: 3.5
+      });
+
+      // Split lines
+      items.push({
+        type: 'shape',
+        shapeType: 'line',
+        start: { x: 125, y: 100 },
+        end: { x: 125, y: 250 },
+        color: '#b45309',
+        size: 2
+      });
+      items.push({
+        type: 'shape',
+        shapeType: 'line',
+        start: { x: 50, y: 175 },
+        end: { x: 200, y: 175 },
+        color: '#b45309',
+        size: 2
+      });
+
+      // Slice labels
+      items.push({ type: 'text', text: '1/4', x: 75, y: 145, color: '#92400e', fontSize: 14, fontWeight: 'bold' });
+      items.push({ type: 'text', text: '1/4', x: 75, y: 220, color: '#92400e', fontSize: 14, fontWeight: 'bold' });
+      items.push({ type: 'text', text: 'Half Pizza', x: 60, y: 85, color: '#b45309', fontSize: 12, fontWeight: 'bold' });
+
+      // Step-by-step
+      items.push({ type: 'text', text: 'Step 1: Start with 1/2 pizza', x: 230, y: 100, color: '#1e293b', fontSize: 13 });
+      items.push({ type: 'text', text: 'Step 2: How many 1/4 slices fit in 1/2?', x: 230, y: 130, color: '#1e293b', fontSize: 13 });
+      items.push({ type: 'text', text: 'Step 3: Count them: exactly 2 slices!', x: 230, y: 160, color: '#1e293b', fontSize: 13, fontWeight: 'bold' });
+      items.push({ type: 'text', text: 'Rule: 1/2 ÷ 1/4 = 1/2 × 4/1 = 2', x: 230, y: 195, color: '#2563eb', fontSize: 13, fontWeight: 'bold' });
+
+      // Answer Box
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 230, y: 230 },
+        end: { x: 470, y: 280 },
+        color: '#059669',
+        fillColor: '#ecfdf5',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: 'Answer: 2 slices',
+        x: 250,
+        y: 261,
+        color: '#059669',
+        fontSize: 15,
+        fontWeight: 'bold'
+      });
+
+    } else {
+      // General Nudge / Hint / Solution from toastData
+      const category = toastData?.category ? (toastData.category.charAt(0).toUpperCase() + toastData.category.slice(1)) : 'Pedagogical Guidance';
+      cardTitle = toastData?.title || `💡 Coach Hint: ${category}`;
+      cardSummary = toastData?.toast_text || toastData?.notebook_entry || 'Pedagogical guidance';
+      boxW = 500;
+      boxH = 280;
+
+      const mainText = toastData?.toast_text || toastData?.notebook_entry || 'Suggested visual prompt / check-in question for pupil.';
+      const actionText = toastData?.action_label || toastData?.suggestion || 'Guide pupil to explain reasoning step by step';
+
+      items.push({
+        type: 'text',
+        text: '🎯 Observation & Hint:',
+        x: 30,
+        y: 80,
+        color: '#4338ca',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+      items.push({
+        type: 'text',
+        text: mainText,
+        x: 30,
+        y: 110,
+        color: '#1e293b',
+        fontSize: 13,
+        maxWidth: 440
+      });
+      items.push({
+        type: 'text',
+        text: `👉 Action: ${actionText}`,
+        x: 30,
+        y: 155,
+        color: '#0284c7',
+        fontSize: 13,
+        fontWeight: 'bold',
+        maxWidth: 440
+      });
+
+      // Pupil Response / Working Area Box
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 30, y: 190 },
+        end: { x: 470, y: 245 },
+        color: '#059669',
+        fillColor: '#f0fdf4',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: '✏️ Pupil Working Area / Answer: [Write here]',
+        x: 45,
+        y: 224,
+        color: '#059669',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+    }
+
+    return insertGeneratedContent({
+      title: cardTitle,
+      summary: cardSummary,
+      width: boxW,
+      height: boxH,
+      elements: items
+    });
+  };
+
+  // Expose snapshot extraction, recentering handles, and element insertion to parent
   useImperativeHandle(ref, () => ({
     getElements: () => elementsRef.current,
     recenterOnPeer: (coords) => recenterOnPeer(coords),
     recenterOnTutor: (coords) => recenterOnPeer(coords),
-    insertGeneratedContent: ({ elements, width, height, position, title, summary }) => {
-      if (!Array.isArray(elements) || elements.length === 0) return [];
-
-      const canvas = canvasRef.current;
-      const rect = canvas ? canvas.getBoundingClientRect() : { width: 960, height: 600 };
-      const curPan = panRef.current || pan;
-      const curZoom = zoomRef.current || zoom;
-
-      const viewportCenterX = (rect.width / 2 - curPan.x) / curZoom;
-      const viewportCenterY = (rect.height / 2 - curPan.y) / curZoom;
-
-      const boxW = width || 540;
-      const boxH = height || 360;
-      const originX = position ? position.x : Math.round(viewportCenterX - boxW / 2);
-      const originY = position ? position.y : Math.round(viewportCenterY - boxH / 2);
-
-      const now = Date.now();
-      const cardId = `card_box_${now}_${Math.random().toString(36).substr(2, 6)}`;
-      const cardTitle = title || '✨ AI Whiteboard Exercise';
-
-      // Find if an element is the card background rectangle
-      const bgIdx = elements.findIndex(el =>
-        el.type === 'shape' && el.shapeType === 'rectangle' &&
-        (el.start?.x ?? 0) <= 10 && (el.start?.y ?? 0) <= 10 &&
-        (el.end?.x ?? 0) >= boxW - 50
-      );
-
-      const preparedElements = [];
-
-      // Add Card Box container
-      if (bgIdx !== -1) {
-        const bgItem = elements[bgIdx];
-        preparedElements.push({
-          ...bgItem,
-          id: bgItem.id || `${cardId}_bg`,
-          cardId,
-          isCardBox: true,
-          cardTitle,
-          cardSummary: summary || '',
-          start: {
-            x: originX,
-            y: originY
-          },
-          end: {
-            x: originX + boxW,
-            y: originY + boxH
-          },
-          color: bgItem.color || '#cbd5e1',
-          fillColor: bgItem.fillColor || '#ffffff',
-          size: 2,
-          role,
-          clientId
-        });
-      } else {
-        preparedElements.push({
-          id: `${cardId}_bg`,
-          type: 'shape',
-          shapeType: 'rectangle',
-          cardId,
-          isCardBox: true,
-          cardTitle,
-          cardSummary: summary || '',
-          start: {
-            x: originX,
-            y: originY
-          },
-          end: {
-            x: originX + boxW,
-            y: originY + boxH
-          },
-          color: '#cbd5e1',
-          fillColor: '#ffffff',
-          size: 2,
-          role,
-          clientId
-        });
-      }
-
-      // Add child elements
-      elements.forEach((item, index) => {
-        if (index === bgIdx) return;
-        const id = item.id || `ai_el_${now}_${index}`;
-        if (item.type === 'shape') {
-          preparedElements.push({
-            ...item,
-            id,
-            cardId,
-            start: {
-              x: originX + (item.start?.x ?? 0),
-              y: originY + (item.start?.y ?? 0)
-            },
-            end: {
-              x: originX + (item.end?.x ?? 0),
-              y: originY + (item.end?.y ?? 0)
-            },
-            role,
-            clientId
-          });
-        } else if (item.type === 'text') {
-          preparedElements.push({
-            ...item,
-            id,
-            cardId,
-            x: originX + (item.x ?? 0),
-            y: originY + (item.y ?? 0),
-            maxWidth: item.maxWidth || Math.max(260, boxW - (item.x ?? 0) - 20),
-            role,
-            clientId
-          });
-        } else {
-          preparedElements.push({ ...item, id, cardId, role, clientId });
-        }
-      });
-
-      for (const el of preparedElements) {
-        elementsRef.current.push(el);
-        undoStackRef.current.push({ type: 'add', element: el });
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'whiteboard_element',
-            element: el,
-            role,
-            clientId
-          }));
-        }
-      }
-
-      // Automatically switch to moving object mode so the tutor can immediately drag and drop
-      setPrevTool(tool);
-      setTool('move');
-
-      updateHistoryState();
-      redrawAll();
-      triggerSnapshotDispatch();
-      return preparedElements;
-    },
+    insertGeneratedContent: (opts) => insertGeneratedContent(opts),
     getSnapshot: captureSnapshot,
     clearBoard: () => {
       handleClear(true);
     },
-    insertVisualExample: (exampleType = 'fraction_pizza') => {
-      const canvas = canvasRef.current;
-      const rect = canvas ? canvas.getBoundingClientRect() : { width: 800, height: 600 };
-      const cx = Math.round((-panRef.current.x + rect.width / 2) / zoomRef.current);
-      const cy = Math.round((-panRef.current.y + rect.height / 2) / zoomRef.current);
-
-      const newElements = [];
-      const now = Date.now();
-
-      // Support dynamic custom diagram payload or string key
-      const isCustomDiagram = typeof exampleType === 'object' && exampleType !== null;
-      const diagramKind = isCustomDiagram ? (exampleType.kind || exampleType.type) : exampleType;
-      const params = isCustomDiagram ? (exampleType.params || {}) : {};
-
-      if (diagramKind === 'stepping_stone_text' || (isCustomDiagram && exampleType.type === 'stepping_stone_text')) {
-        const stoneText = exampleType.text || exampleType.stepping_stone || 'Try: 20 - 1 = ?';
-        // Note Card Container
-        newElements.push({
-          id: `stone_bg_${now}`,
-          type: 'shape',
-          shapeType: 'rectangle',
-          start: { x: cx - 180, y: cy - 50 },
-          end: { x: cx + 180, y: cy + 50 },
-          color: '#0284c7',
-          size: 2
-        });
-        newElements.push({
-          id: `stone_hdr_${now}`,
-          type: 'text',
-          text: '💡 Stepping Stone Question:',
-          x: cx - 160,
-          y: cy - 25,
-          color: '#0369a1'
-        });
-        newElements.push({
-          id: `stone_txt_${now}`,
-          type: 'text',
-          text: stoneText,
-          x: cx - 160,
-          y: cy + 8,
-          color: '#0f172a'
-        });
-        newElements.push({
-          id: `stone_sub_${now}`,
-          type: 'text',
-          text: '(Solve this simpler anchor first)',
-          x: cx - 160,
-          y: cy + 32,
-          color: '#64748b'
-        });
-      } else if (diagramKind === 'number_line_hop') {
-        const eqStr = params.equation || '21 - 1 = 20';
-        const startVal = params.start !== undefined ? params.start : 21;
-        const stepVal = params.step !== undefined ? params.step : -1;
-        const resVal = params.result !== undefined ? params.result : 20;
-
-        // Title
-        newElements.push({
-          id: `hop_title_${now}`,
-          type: 'text',
-          text: `📐 Directed Hop Model: ${eqStr}`,
-          x: cx - 150,
-          y: cy - 75,
-          color: '#0f172a'
-        });
-        // Horizontal Axis line
-        newElements.push({
-          id: `hop_axis_${now}`,
-          type: 'shape',
-          shapeType: 'arrow',
-          start: { x: cx - 160, y: cy },
-          end: { x: cx + 160, y: cy },
-          color: '#334155',
-          size: 2.5
-        });
-        // Tick marks: result tick and start tick
-        newElements.push({
-          id: `hop_tk_res_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx - 50, y: cy - 12 },
-          end: { x: cx - 50, y: cy + 12 },
-          color: '#059669',
-          size: 2.5
-        });
-        newElements.push({
-          id: `hop_lbl_res_${now}`,
-          type: 'text',
-          text: `${resVal} (target)`,
-          x: cx - 80,
-          y: cy + 28,
-          color: '#059669'
-        });
-        newElements.push({
-          id: `hop_tk_st_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx + 70, y: cy - 12 },
-          end: { x: cx + 70, y: cy + 12 },
-          color: '#2563eb',
-          size: 2.5
-        });
-        newElements.push({
-          id: `hop_lbl_st_${now}`,
-          type: 'text',
-          text: `${startVal} (start)`,
-          x: cx + 45,
-          y: cy + 28,
-          color: '#2563eb'
-        });
-        // Directional Hop Arrow from Start back to Result
-        newElements.push({
-          id: `hop_arrow_${now}`,
-          type: 'shape',
-          shapeType: 'arrow',
-          start: { x: cx + 65, y: cy - 18 },
-          end: { x: cx - 45, y: cy - 18 },
-          color: '#dc2626',
-          size: 2.5
-        });
-        newElements.push({
-          id: `hop_jump_lbl_${now}`,
-          type: 'text',
-          text: `Jump ${stepVal}`,
-          x: cx - 8,
-          y: cy - 36,
-          color: '#dc2626'
-        });
-        // Bottom explanation
-        newElements.push({
-          id: `hop_expl_${now}`,
-          type: 'text',
-          text: `Step back ${Math.abs(stepVal)} from ${startVal} lands on ${resVal}`,
-          x: cx - 110,
-          y: cy + 60,
-          color: '#047857'
-        });
-      } else if (diagramKind === 'fraction_strip') {
-        const topNum = params.top_num || 3;
-        const topDen = params.top_den || 4;
-        const botNum = params.bottom_num || 1;
-        const botDen = params.bottom_den || 2;
-        const eqStr = params.equation || `${topNum}/${topDen} ÷ ${botNum}/${botDen}`;
-
-        newElements.push({
-          id: `fs_title_${now}`,
-          type: 'text',
-          text: `🍕 Fraction Bar Model: ${eqStr}`,
-          x: cx - 150,
-          y: cy - 75,
-          color: '#0f172a'
-        });
-        // Bar 1 (Top fraction)
-        newElements.push({
-          id: `fs_bar1_${now}`,
-          type: 'shape',
-          shapeType: 'rectangle',
-          start: { x: cx - 120, y: cy - 40 },
-          end: { x: cx + 120, y: cy - 10 },
-          color: '#2563eb',
-          size: 2
-        });
-        newElements.push({
-          id: `fs_lbl1_${now}`,
-          type: 'text',
-          text: `Dividend: ${topNum}/${topDen}`,
-          x: cx + 130,
-          y: cy - 20,
-          color: '#2563eb'
-        });
-        // Bar 2 (Divisor fraction)
-        newElements.push({
-          id: `fs_bar2_${now}`,
-          type: 'shape',
-          shapeType: 'rectangle',
-          start: { x: cx - 120, y: cy + 10 },
-          end: { x: cx + 120, y: cy + 40 },
-          color: '#059669',
-          size: 2
-        });
-        newElements.push({
-          id: `fs_lbl2_${now}`,
-          type: 'text',
-          text: `Divisor: ${botNum}/${botDen}`,
-          x: cx + 130,
-          y: cy + 30,
-          color: '#059669'
-        });
-        // Vertical divider on bar 2 at midpoint
-        newElements.push({
-          id: `fs_mid_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx, y: cy + 10 },
-          end: { x: cx, y: cy + 40 },
-          color: '#047857',
-          size: 2
-        });
-        newElements.push({
-          id: `fs_expl_${now}`,
-          type: 'text',
-          text: `How many ${botNum}/${botDen} bars fit into ${topNum}/${topDen}?`,
-          x: cx - 140,
-          y: cy + 65,
-          color: '#334155'
-        });
-      } else if (diagramKind === 'array_grid') {
-        const rows = Math.min(8, params.rows || 5);
-        const cols = Math.min(8, params.cols || 5);
-        const eqStr = params.equation || `${rows} × ${cols}`;
-        newElements.push({
-          id: `ag_title_${now}`,
-          type: 'text',
-          text: `🔢 Array Model: ${eqStr}`,
-          x: cx - 120,
-          y: cy - 60,
-          color: '#0f172a'
-        });
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            newElements.push({
-              id: `ag_dot_${r}_${c}_${now}`,
-              type: 'shape',
-              shapeType: 'circle',
-              start: { x: cx - (cols * 18) / 2 + c * 18 - 4, y: cy - (rows * 18) / 2 + r * 18 - 4 },
-              end: { x: cx - (cols * 18) / 2 + c * 18 + 4, y: cy - (rows * 18) / 2 + r * 18 + 4 },
-              color: '#2563eb',
-              size: 2
-            });
-          }
-        }
-      } else if (diagramKind === 'place_value') {
-        // 🔢 Place Value Breakdown Model (Tens | Ones)
-        newElements.push({
-          id: `pv_title_${now}`,
-          type: 'text',
-          text: '🔢 Place Value Table: 21 - 1 = 20',
-          x: cx - 140,
-          y: cy - 90,
-          color: '#0f172a'
-        });
-        // Header separator
-        newElements.push({
-          id: `pv_hline_hdr_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx - 140, y: cy - 40 },
-          end: { x: cx + 140, y: cy - 40 },
-          color: '#334155',
-          size: 2
-        });
-        // Column vertical divider
-        newElements.push({
-          id: `pv_vline_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx, y: cy - 60 },
-          end: { x: cx, y: cy + 70 },
-          color: '#334155',
-          size: 2
-        });
-        // Column headers
-        newElements.push({
-          id: `pv_lbl_tens_${now}`,
-          type: 'text',
-          text: 'Tens (10s)',
-          x: cx - 110,
-          y: cy - 48,
-          color: '#2563eb'
-        });
-        newElements.push({
-          id: `pv_lbl_ones_${now}`,
-          type: 'text',
-          text: 'Ones (1s)',
-          x: cx + 30,
-          y: cy - 48,
-          color: '#059669'
-        });
-        // Row 1: 21
-        newElements.push({
-          id: `pv_r1_t_${now}`,
-          type: 'text',
-          text: '2  (= 20)',
-          x: cx - 100,
-          y: cy - 12,
-          color: '#0f172a'
-        });
-        newElements.push({
-          id: `pv_r1_o_${now}`,
-          type: 'text',
-          text: '1',
-          x: cx + 55,
-          y: cy - 12,
-          color: '#0f172a'
-        });
-        // Row 2: - 1
-        newElements.push({
-          id: `pv_r2_t_${now}`,
-          type: 'text',
-          text: '- 0',
-          x: cx - 100,
-          y: cy + 20,
-          color: '#64748b'
-        });
-        newElements.push({
-          id: `pv_r2_o_${now}`,
-          type: 'text',
-          text: '- 1',
-          x: cx + 45,
-          y: cy + 20,
-          color: '#dc2626'
-        });
-        // Result line
-        newElements.push({
-          id: `pv_hline_res_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx - 140, y: cy + 35 },
-          end: { x: cx + 140, y: cy + 35 },
-          color: '#0f172a',
-          size: 2.5
-        });
-        // Result row: 20
-        newElements.push({
-          id: `pv_res_t_${now}`,
-          type: 'text',
-          text: '2  (= 20)',
-          x: cx - 100,
-          y: cy + 60,
-          color: '#2563eb'
-        });
-        newElements.push({
-          id: `pv_res_o_${now}`,
-          type: 'text',
-          text: '0',
-          x: cx + 55,
-          y: cy + 60,
-          color: '#059669'
-        });
-        // Bottom explanation
-        newElements.push({
-          id: `pv_expl_${now}`,
-          type: 'text',
-          text: '=> 1 - 1 = 0 in Ones; 2 in Tens stays 20 -> Answer: 20',
-          x: cx - 160,
-          y: cy + 95,
-          color: '#047857'
-        });
-      } else if (exampleType === 'circle_guide') {
-        // ⭕ Labeled Circle Geometry Guide
-        newElements.push({
-          id: `cg_title_${now}`,
-          type: 'text',
-          text: '⭕ Circle: d = 2r | Area = πr² | C = 2πr',
-          x: cx - 150,
-          y: cy - 105,
-          color: '#0f172a'
-        });
-        newElements.push({
-          id: `cg_circle_${now}`,
-          type: 'shape',
-          shapeType: 'circle',
-          start: { x: cx - 80, y: cy - 80 },
-          end: { x: cx + 80, y: cy + 80 },
-          color: '#2563eb',
-          size: 3
-        });
-        newElements.push({
-          id: `cg_radius_${now}`,
-          type: 'shape',
-          shapeType: 'arrow',
-          start: { x: cx, y: cy },
-          end: { x: cx + 80, y: cy },
-          color: '#dc2626',
-          size: 2.5
-        });
-        newElements.push({
-          id: `cg_lbl_r_${now}`,
-          type: 'text',
-          text: 'Radius (r)',
-          x: cx + 18,
-          y: cy - 8,
-          color: '#dc2626'
-        });
-        newElements.push({
-          id: `cg_center_${now}`,
-          type: 'shape',
-          shapeType: 'circle',
-          start: { x: cx - 3, y: cy - 3 },
-          end: { x: cx + 3, y: cy + 3 },
-          color: '#0f172a',
-          size: 3
-        });
-      } else if (exampleType === 'rectangle_guide') {
-        // 📐 Labeled Rectangle Geometry Guide
-        newElements.push({
-          id: `rg_title_${now}`,
-          type: 'text',
-          text: '📐 Rectangle: Area = w × h | Perimeter = 2(w + h)',
-          x: cx - 160,
-          y: cy - 85,
-          color: '#0f172a'
-        });
-        newElements.push({
-          id: `rg_rect_${now}`,
-          type: 'shape',
-          shapeType: 'rectangle',
-          start: { x: cx - 110, y: cy - 50 },
-          end: { x: cx + 110, y: cy + 50 },
-          color: '#059669',
-          size: 3
-        });
-        newElements.push({
-          id: `rg_lbl_w_${now}`,
-          type: 'text',
-          text: 'Width (w)',
-          x: cx - 35,
-          y: cy - 60,
-          color: '#059669'
-        });
-        newElements.push({
-          id: `rg_lbl_h_${now}`,
-          type: 'text',
-          text: 'Height (h)',
-          x: cx + 120,
-          y: cy + 5,
-          color: '#059669'
-        });
-      } else if (exampleType === 'number_line') {
-        const lineY = cy;
-        newElements.push({
-          id: `nl_main_${now}`,
-          type: 'shape',
-          shapeType: 'arrow',
-          start: { x: cx - 180, y: lineY },
-          end: { x: cx + 180, y: lineY },
-          color: '#2563eb',
-          size: 3
-        });
-        [-150, -75, 0, 75, 150].forEach((dx, i) => {
-          const labels = ['0', '1/4', '1/2', '3/4', '1'];
-          newElements.push({
-            id: `nl_tick_${i}_${now}`,
-            type: 'shape',
-            shapeType: 'line',
-            start: { x: cx + dx, y: lineY - 12 },
-            end: { x: cx + dx, y: lineY + 12 },
-            color: '#1e293b',
-            size: 2
-          });
-          newElements.push({
-            id: `nl_lbl_${i}_${now}`,
-            type: 'text',
-            text: labels[i],
-            x: cx + dx - 10,
-            y: lineY + 30
-          });
-        });
-        newElements.push({
-          id: `nl_title_${now}`,
-          type: 'text',
-          text: '📏 Number Line: 2 jumps of 1/4 reach 1/2',
-          x: cx - 160,
-          y: lineY - 40
-        });
-      } else {
-        // Default: 🍕 Pizza Fraction Slices Model
-        newElements.push({
-          id: `pizza_crust_${now}`,
-          type: 'shape',
-          shapeType: 'circle',
-          start: { x: cx - 85, y: cy - 85 },
-          end: { x: cx + 85, y: cy + 85 },
-          color: '#d97706',
-          size: 4
-        });
-        newElements.push({
-          id: `pizza_vsplit_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx, y: cy - 85 },
-          end: { x: cx, y: cy + 85 },
-          color: '#b45309',
-          size: 2.5
-        });
-        newElements.push({
-          id: `pizza_hsplit_${now}`,
-          type: 'shape',
-          shapeType: 'line',
-          start: { x: cx - 85, y: cy },
-          end: { x: cx + 85, y: cy },
-          color: '#b45309',
-          size: 2.5
-        });
-        newElements.push({
-          id: `pizza_title_${now}`,
-          type: 'text',
-          text: '🍕 Fraction Model: 1/2 ÷ 1/4 = 2',
-          x: cx - 130,
-          y: cy - 105
-        });
-        newElements.push({
-          id: `pizza_expl_${now}`,
-          type: 'text',
-          text: '"How many 1/4 slices fit in 1/2 pizza? -> 2 slices!"',
-          x: cx - 170,
-          y: cy + 120
-        });
-      }
-
-      for (const el of newElements) {
-        el.role = role || 'tutor';
-        el.clientId = clientId;
-        elementsRef.current.push(el);
-        undoStackRef.current.push({ type: 'add', element: el });
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'whiteboard_element',
-            element: el,
-            role: role || 'tutor',
-            clientId
-          }));
-        }
-      }
-
-      updateHistoryState();
-      redrawAll();
-      triggerSnapshotDispatch();
-    }
+    insertVisualExample: (exampleType, toastData) => insertVisualExample(exampleType, toastData)
   }));
 
   // Setup High-DPI canvas
@@ -2747,31 +2548,23 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
   };
 
   const handlePasteTextToBoard = (text) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const centerWorld = toWorld(rect.width / 2, rect.height / 2);
-    const newTextElement = {
-      id: `text_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-      type: 'text',
-      text,
-      x: centerWorld.x - 60,
-      y: centerWorld.y,
-      role,
-      clientId
-    };
-    elementsRef.current.push(newTextElement);
-    pushUndoAction({ type: 'add', element: newTextElement });
-    redrawAll();
-
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({
-        type: 'whiteboard_element',
-        element: newTextElement,
-        role,
-        clientId
-      }));
-    }
+    insertGeneratedContent({
+      title: '🧮 Calculator Output',
+      summary: text,
+      width: 320,
+      height: 125,
+      elements: [
+        {
+          type: 'text',
+          text,
+          x: 20,
+          y: 75,
+          color: '#0f172a',
+          fontSize: 18,
+          maxWidth: 280
+        }
+      ]
+    });
   };
 
   return (

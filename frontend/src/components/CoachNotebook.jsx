@@ -13,7 +13,8 @@ export default function CoachNotebook({
   onToggle,
   entries = [],
   topTakeaways = [],
-  onOpenFullReport
+  onOpenFullReport,
+  onApplyExample
 }) {
   const unreadCount = entries.filter(e => !e.read).length;
 
@@ -151,7 +152,38 @@ export default function CoachNotebook({
               <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', color: '#e2e8f0', lineHeight: 1.5 }}>
                 {topTakeaways.length > 0 ? (
                   topTakeaways.map((t, idx) => (
-                    <li key={idx} style={{ marginBottom: '4px' }}>{t}</li>
+                    <li key={idx} style={{ marginBottom: '6px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
+                      <span style={{ flex: 1 }}>{t}</span>
+                      {onApplyExample && (
+                        <button
+                          onClick={() => {
+                            const isFraction = t.toLowerCase().includes('fraction') || t.toLowerCase().includes('pizza');
+                            const isNumberLine = t.toLowerCase().includes('number line');
+                            const exampleType = isFraction ? 'fraction_pizza' : (isNumberLine ? 'number_line' : 'nudge_hint');
+                            onApplyExample(exampleType, {
+                              title: '💡 Takeaway Visual Scaffold',
+                              toast_text: t,
+                              action_label: 'Explore visual representation'
+                            });
+                          }}
+                          title="Drop visual scaffold onto whiteboard"
+                          style={{
+                            padding: '2px 7px',
+                            borderRadius: '5px',
+                            backgroundColor: '#059669',
+                            color: '#ffffff',
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            border: 'none',
+                            cursor: 'pointer',
+                            whiteSpace: 'nowrap',
+                            boxShadow: '0 1px 3px rgba(5, 150, 105, 0.3)'
+                          }}
+                        >
+                          ✋ Drop
+                        </button>
+                      )}
+                    </li>
                   ))
                 ) : (
                   <>
@@ -202,9 +234,66 @@ export default function CoachNotebook({
                         <div style={{ color: '#cbd5e1' }}>
                           {entry.text}
                         </div>
-                        {entry.suggestion && (
-                          <div style={{ marginTop: '4px', fontSize: '11px', color: '#38bdf8', fontStyle: 'italic' }}>
-                            💡 {entry.suggestion}
+                        {entry.suggestion ? (
+                          <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                            <div style={{ fontSize: '11px', color: '#38bdf8', fontStyle: 'italic', flex: 1 }}>
+                              💡 {entry.suggestion}
+                            </div>
+                            {onApplyExample && (
+                              <button
+                                onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
+                                  title: `💡 Coach Tip: ${entry.category || 'Guidance'}`,
+                                  action_label: entry.suggestion,
+                                  toast_text: entry.text,
+                                  ...entry
+                                })}
+                                title="Drop this guidance onto whiteboard as a draggable card"
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  padding: '3px 8px',
+                                  borderRadius: '5px',
+                                  backgroundColor: '#059669',
+                                  color: '#ffffff',
+                                  fontSize: '10.5px',
+                                  fontWeight: 700,
+                                  border: 'none',
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap',
+                                  boxShadow: '0 1px 4px rgba(5, 150, 105, 0.3)'
+                                }}
+                              >
+                                <span>✋ Drop</span>
+                              </button>
+                            )}
+                          </div>
+                        ) : onApplyExample && (
+                          <div style={{ marginTop: '6px', display: 'flex', justifyContent: 'flex-end' }}>
+                            <button
+                              onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
+                                title: `💡 Coach Observation: ${entry.category || 'Note'}`,
+                                toast_text: entry.text,
+                                ...entry
+                              })}
+                              title="Drop this observation onto whiteboard as a draggable card"
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                padding: '2px 7px',
+                                borderRadius: '5px',
+                                backgroundColor: '#334155',
+                                color: '#e2e8f0',
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                border: '1px solid #475569',
+                                cursor: 'pointer',
+                                whiteSpace: 'nowrap'
+                              }}
+                            >
+                              <span>✋ Drop Note</span>
+                            </button>
                           </div>
                         )}
                       </div>

@@ -336,8 +336,8 @@ export default function CoachToast({
 
         {/* Primary Action Button: Drop on Board */}
         <button
-          onClick={() => onApplyExample(toast.custom_diagram || toast.example_type || 'number_line')}
-          title="Draw visual breakdown directly on whiteboard canvas"
+          onClick={() => onApplyExample(toast.custom_diagram || toast.example_type || 'fraction_pizza', toast)}
+          title="Draw example directly on whiteboard canvas as a draggable card"
           style={{
             display: 'flex',
             alignItems: 'center',
