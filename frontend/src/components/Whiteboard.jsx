@@ -2801,21 +2801,6 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
             <Hand size={16} />
           </button>
 
-          <button 
-            onClick={() => setTool('highlighter')}
-            title="Highlighter"
-            style={{
-              padding: '5px 8px',
-              borderRadius: '6px',
-              background: tool === 'highlighter' ? '#2563eb' : 'transparent',
-              color: tool === 'highlighter' ? '#ffffff' : '#64748b',
-              border: 'none',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-            <Highlighter size={16} />
-          </button>
         </div>
 
         {/* Eraser Options Dropdown */}

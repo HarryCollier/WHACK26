@@ -78,7 +78,7 @@ describe('Whiteboard Component', () => {
   it('renders tools and allows tool selection', () => {
     render(<Whiteboard />);
     expect(screen.getByTitle('Pen')).toBeInTheDocument();
-    expect(screen.getByTitle('Highlighter')).toBeInTheDocument();
+    expect(screen.queryByTitle('Highlighter')).toBeNull();
     expect(screen.getByTitle(/^Eraser \(/i)).toBeInTheDocument();
     expect(screen.getByTitle(/Moving Object Mode/i)).toBeInTheDocument();
     expect(screen.getByText(/Clear Board/i)).toBeInTheDocument();
