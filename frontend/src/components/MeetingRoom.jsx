@@ -355,7 +355,7 @@ const MeetingRoom = ({ session, onLeave }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Demo Nudge Trigger (hotkey: Ctrl+Shift+D or Alt+D) - cycles through T3 & T2 alerts
+  // Demo Nudge Trigger removed
   const demoCycleRef = useRef(0);
   const triggerDemoNudge = () => {
     const triggers = ['demo_face_confusion', 'demo_subtraction', 'demo_geometry', 'demo_pacing', 'demo_fractions'];
@@ -486,16 +486,7 @@ const MeetingRoom = ({ session, onLeave }) => {
     setActiveToast(null);
   };
 
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') || (e.altKey && e.key.toLowerCase() === 'd')) {
-        e.preventDefault();
-        triggerDemoNudge();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+
 
   const handlePipPointerDown = (e) => {
     isDraggingPip.current = true;
@@ -583,27 +574,6 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          {/* Quick Demo Trigger for 3-minute pitch */}
-          {role === 'tutor' && (
-            <button
-              onClick={triggerDemoNudge}
-              title="Ctrl+Shift+D: Cycle T3 & T2 Alerts (Rolling confusion while explaining, repeated errors, geometry guides, pacing silence)"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                padding: '6px 12px',
-                borderRadius: '6px',
-                backgroundColor: '#7c2d12',
-                color: '#fed7aa',
-                fontSize: '12px',
-                fontWeight: 600,
-                border: '1px solid #ea580c',
-                cursor: 'pointer'
-              }}>
-              <span>⚡ Demo Nudge</span>
-            </button>
-          )}
 
           {/* AI Coach Button for Tutor */}
           {role === 'tutor' && (
@@ -687,26 +657,6 @@ const MeetingRoom = ({ session, onLeave }) => {
             </button>
           )}
 
-          {/* Live Dialogue Drawer Toggle */}
-          <button
-            onClick={() => setShowDialogue(prev => !prev)}
-            title="Toggle Live Dialogue & Transcripts"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              backgroundColor: showDialogue ? '#064e3b' : '#1e293b',
-              color: showDialogue ? '#6ee7b7' : '#94a3b8',
-              fontSize: '12px',
-              fontWeight: 600,
-              border: `1px solid ${showDialogue ? '#059669' : '#334155'}`,
-              cursor: 'pointer'
-            }}>
-            <MessageSquare size={14} />
-            <span>Dialogue {transcripts.length > 0 ? `(${transcripts.length})` : ''}</span>
-          </button>
 
           <button
             onClick={() => setShowDiagnostics(true)}
@@ -875,58 +825,6 @@ const MeetingRoom = ({ session, onLeave }) => {
           />
         )}
 
-        {/* Real-time Floating Subtitles Overlay */}
-        {transcripts.length > 0 && (
-          <div style={{
-            position: 'absolute',
-            bottom: activeToast ? '106px' : '24px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            maxWidth: '80%',
-            zIndex: 30,
-            pointerEvents: 'none',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            alignItems: 'center',
-            transition: 'bottom 0.2s ease'
-          }}>
-            {transcripts.slice(-2).map((t, idx) => {
-              const isTutor = t.role === 'tutor';
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    backgroundColor: 'rgba(15, 23, 42, 0.90)',
-                    backdropFilter: 'blur(8px)',
-                    border: `1px solid ${isTutor ? 'rgba(56, 189, 248, 0.5)' : 'rgba(74, 222, 128, 0.5)'}`,
-                    borderRadius: '8px',
-                    padding: '8px 16px',
-                    color: '#f8fafc',
-                    fontSize: '14px',
-                    lineHeight: '1.4',
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
-                    textAlign: 'center',
-                    pointerEvents: 'auto',
-                    maxWidth: '100%'
-                  }}
-                >
-                  <span style={{
-                    color: isTutor ? '#38bdf8' : '#4ade80',
-                    fontWeight: 700,
-                    marginRight: '8px',
-                    textTransform: 'uppercase',
-                    fontSize: '11px',
-                    letterSpacing: '0.05em'
-                  }}>
-                    {isTutor ? 'Tutor' : 'Student'}:
-                  </span>
-                  <span>{t.text}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
 
       {/* Stream Dispatcher with configurable sample rates */}
@@ -1338,108 +1236,6 @@ const MeetingRoom = ({ session, onLeave }) => {
         </div>
       )}
 
-      {/* Live Dialogue & Full Transcript Drawer */}
-      {showDialogue && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          right: 0,
-          bottom: 0,
-          width: '380px',
-          backgroundColor: '#0f172a',
-          borderLeft: '1px solid #334155',
-          boxShadow: '-6px 0 24px rgba(0,0,0,0.6)',
-          zIndex: 1000,
-          display: 'flex',
-          flexDirection: 'column'
-        }}>
-          {/* Header */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '16px 20px',
-            borderBottom: '1px solid #334155',
-            backgroundColor: '#1e293b'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <MessageSquare size={18} color="#38bdf8" />
-              <div>
-                <h3 style={{ fontSize: '15px', fontWeight: 600, margin: 0 }}>Live Dialogue Log</h3>
-                <p style={{ fontSize: '11px', color: '#94a3b8', margin: '2px 0 0 0' }}>
-                  Real-time Whisper speech transcription
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowDialogue(false)}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: '#94a3b8',
-                cursor: 'pointer',
-                padding: '6px',
-                borderRadius: '6px',
-                display: 'flex',
-                alignItems: 'center'
-              }}>
-              <X size={18} />
-            </button>
-          </div>
-
-          {/* Transcript List */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {transcripts.length === 0 ? (
-              <div style={{
-                textAlign: 'center',
-                color: '#64748b',
-                marginTop: '60px',
-                padding: '20px',
-                border: '1px dashed #334155',
-                borderRadius: '8px'
-              }}>
-                <MessageSquare size={28} color="#475569" style={{ margin: '0 auto 8px' }} />
-                <p style={{ fontSize: '13px', fontWeight: 500, color: '#94a3b8', margin: '0 0 6px 0' }}>
-                  No speech captured yet
-                </p>
-                <p style={{ fontSize: '11px', color: '#64748b', margin: 0, lineHeight: 1.5 }}>
-                  Speak clearly into your microphone. Once speech is detected, live transcripts will appear here and on the whiteboard subtitles.
-                </p>
-              </div>
-            ) : (
-              transcripts.map((t, idx) => {
-                const isTutor = t.role === 'tutor';
-                return (
-                  <div key={idx} style={{
-                    backgroundColor: '#1e293b',
-                    border: `1px solid ${isTutor ? '#0284c740' : '#16a34a40'}`,
-                    borderRadius: '8px',
-                    padding: '10px 12px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                      <span style={{
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        textTransform: 'uppercase',
-                        color: isTutor ? '#38bdf8' : '#4ade80'
-                      }}>
-                        {isTutor ? 'Tutor' : 'Student'}
-                      </span>
-                      <span style={{ fontSize: '10px', color: '#64748b' }}>
-                        {t.timestamp ? new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#e2e8f0', lineHeight: 1.4 }}>
-                      {t.text}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-            <div ref={transcriptEndRef} />
-          </div>
-        </div>
-      )}
     </div>
   );
 };
