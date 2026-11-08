@@ -28,6 +28,7 @@ export default function EndSessionReportModal({
   isOpen,
   onClose,
   onConfirmExit,
+  onOpenAskCoach,
   roomCode,
   title,
   transcripts = []
@@ -395,7 +396,7 @@ export default function EndSessionReportModal({
                           Continue leveraging the interactive whiteboard to underline key mathematical steps during explanations.
                         </li>
                         <li>
-                          Check in with brief conceptual questions whenever pupil dilation or slight brow furrows indicate cognitive struggle.
+                          Check in with a friendly question whenever your student looks puzzled or pauses before answering.
                         </li>
                       </>
                     )}
@@ -510,6 +511,28 @@ export default function EndSessionReportModal({
           </div>
 
           <div style={{ display: 'flex', gap: '8px' }}>
+            {onOpenAskCoach && (
+              <button
+                onClick={onOpenAskCoach}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '8px 16px',
+                  borderRadius: '8px',
+                  background: 'linear-gradient(135deg, #4338ca 0%, #6d28d9 100%)',
+                  color: '#ffffff',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  border: '1px solid #7c3aed',
+                  cursor: 'pointer'
+                }}
+              >
+                <Sparkles size={15} color="#e9d5ff" />
+                <span>Ask AI Coach</span>
+              </button>
+            )}
+
             <button
               onClick={onClose}
               style={{

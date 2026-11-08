@@ -6,7 +6,9 @@ from core.views import (
     SessionStatsView, 
     TelemetryView, 
     EngagementPulseView, 
-    AICoachView
+    AICoachView,
+    AICoachAskView,
+    WhiteboardGenerateView
 )
 
 urlpatterns = [
@@ -17,4 +19,6 @@ urlpatterns = [
     path('api/rooms/<str:room_code>/telemetry/', TelemetryView.as_view(), name='session-telemetry'),
     path('api/rooms/<str:room_code>/engagement/', EngagementPulseView.as_view(), name='session-engagement'),
     path('api/rooms/<str:room_code>/coach/', AICoachView.as_view(), name='session-coach'),
+    path('api/rooms/<str:room_code>/coach/ask/', AICoachAskView.as_view(), name='session-coach-ask'),
+    path('api/rooms/<str:room_code>/whiteboard/generate/', WhiteboardGenerateView.as_view(), name='whiteboard-generate'),
 ]

@@ -22,6 +22,7 @@ import {
   Hand,
   ZoomIn,
   ZoomOut,
+  Target,
   Undo2,
   Redo2
 } from 'lucide-react';
@@ -129,13 +130,38 @@ function isPointInPolygon(px, py, polygon) {
   return inside;
 }
 
+function drawRoundRect(ctx, x, y, w, h, r) {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    const radius = typeof r === 'number' ? r : (Array.isArray(r) ? r[0] : 8);
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.arcTo(x + w, y, x + w, y + radius, radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.arcTo(x + w, y + h, x + w - radius, y + h, radius);
+    ctx.lineTo(x + radius, y + h);
+    ctx.arcTo(x, y + h, x, y + h - radius, radius);
+    ctx.lineTo(x, y + radius);
+    ctx.arcTo(x, y, x + radius, y, radius);
+  }
+}
+
 const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = '', onWhiteboardChange }, ref) => {
   const canvasRef = useRef(null);
   const isDrawing = useRef(false);
 
-  // Tools: 'pen', 'highlighter', 'eraser', 'stroke-eraser', 'lasso-eraser', 'shape', 'hand'
+  // Tools: 'pen', 'move', 'highlighter', 'eraser', 'stroke-eraser', 'lasso-eraser', 'shape', 'hand'
   const [tool, setTool] = useState('pen');
   const [prevTool, setPrevTool] = useState('pen');
+
+  // Interactive Card Box Moving Object State
+  const [hoveredCardId, setHoveredCardId] = useState(null);
+  const isDraggingCard = useRef(false);
+  const dragCardId = useRef(null);
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const dragInitialPositions = useRef(new Map());
+
   const [shapeType, setShapeType] = useState('rectangle'); // 'rectangle', 'circle', 'triangle', 'line', 'arrow'
   const [color, setColor] = useState('#000000');
   const [size, setSize] = useState(4); // Continuous width slider (1-40px)
@@ -155,6 +181,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
   socketRef.current = socket;
   const handleUndoRef = useRef(null);
   const handleRedoRef = useRef(null);
+
+  // Peer Activity & Viewport Recenter State (Option 2)
+  const lastPeerWritingPos = useRef(null);
+  const [peerOffscreenInfo, setPeerOffscreenInfo] = useState(null);
+  const peerInactivityTimer = useRef(null);
+  const cameraAnimRef = useRef(null);
 
   // Multi-touch 2-finger navigation tracking
   const activeTouches = useRef(new Map());
@@ -247,6 +279,184 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       x: worldX * curZoom + curPan.x,
       y: worldY * curZoom + curPan.y
     };
+  };
+
+  // Smoothly animate camera to target pan and zoom
+  const animateCameraTo = (targetPan, targetZoom = zoomRef.current, duration = 350) => {
+    if (cameraAnimRef.current) {
+      cancelAnimationFrame(cameraAnimRef.current);
+    }
+    const startPan = { ...(panRef.current || pan) };
+    const startZoom = zoomRef.current || zoom;
+    const startTime = performance.now();
+
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+    const step = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(1, elapsed / duration);
+      const eased = easeOutCubic(progress);
+
+      const curPanX = startPan.x + (targetPan.x - startPan.x) * eased;
+      const curPanY = startPan.y + (targetPan.y - startPan.y) * eased;
+      const curZoom = startZoom + (targetZoom - startZoom) * eased;
+
+      setPan({ x: curPanX, y: curPanY });
+      setZoom(curZoom);
+
+      if (progress < 1) {
+        cameraAnimRef.current = requestAnimationFrame(step);
+      } else {
+        cameraAnimRef.current = null;
+      }
+    };
+
+    cameraAnimRef.current = requestAnimationFrame(step);
+  };
+
+  // Recenter camera smoothly on the remote peer's latest writing or board content
+  const recenterOnPeer = (targetCoords) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const W = rect.width > 0 ? rect.width : 960;
+    const H = rect.height > 0 ? rect.height : 600;
+
+    let targetWorld = (targetCoords && targetCoords.worldX !== undefined)
+      ? { x: targetCoords.worldX, y: targetCoords.worldY }
+      : (targetCoords || lastPeerWritingPos.current);
+
+    // Fallback 1: inspect elementsRef for the latest element
+    if (!targetWorld && elementsRef.current.length > 0) {
+      const lastEl = elementsRef.current[elementsRef.current.length - 1];
+      if (lastEl.type === 'stroke' && lastEl.points && lastEl.points.length > 0) {
+        targetWorld = lastEl.points[lastEl.points.length - 1];
+      } else if (lastEl.start && lastEl.end) {
+        targetWorld = { x: (lastEl.start.x + lastEl.end.x) / 2, y: (lastEl.start.y + lastEl.end.y) / 2 };
+      } else if (lastEl.x !== undefined && lastEl.y !== undefined) {
+        targetWorld = { x: lastEl.x, y: lastEl.y };
+      }
+    }
+
+    // Fallback 2: center of viewport / default origin
+    if (!targetWorld) {
+      targetWorld = { x: W / 2, y: H / 2 };
+    }
+
+    const curZoom = zoomRef.current || zoom;
+    const targetZoom = Math.max(0.8, Math.min(curZoom, 1.3));
+    const targetPanX = (W / 2) - (targetWorld.x * targetZoom);
+    const targetPanY = (H / 2) - (targetWorld.y * targetZoom);
+
+    // Dismiss offscreen notification pill when recentering
+    setPeerOffscreenInfo(null);
+    animateCameraTo({ x: targetPanX, y: targetPanY }, targetZoom);
+  };
+
+  // Check if a world point is currently off the visible canvas viewport
+  const checkIsOffscreen = (worldX, worldY) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const curZoom = zoomRef.current || zoom;
+    const curPan = panRef.current || pan;
+    const screenX = worldX * curZoom + curPan.x;
+    const screenY = worldY * curZoom + curPan.y;
+
+    const margin = 40; // 40px margin inside canvas edges
+    const isOff = (
+      screenX < margin ||
+      screenX > rect.width - margin ||
+      screenY < margin ||
+      screenY > rect.height - margin
+    );
+
+    if (!isOff) return null;
+
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const dx = screenX - cx;
+    const dy = screenY - cy;
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+    let direction = 'offscreen';
+    let arrow = '↗';
+
+    if (angle >= -22.5 && angle < 22.5) {
+      direction = 'Right';
+      arrow = '→';
+    } else if (angle >= 22.5 && angle < 67.5) {
+      direction = 'Bottom-Right';
+      arrow = '↘';
+    } else if (angle >= 67.5 && angle < 112.5) {
+      direction = 'Below';
+      arrow = '↓';
+    } else if (angle >= 112.5 && angle < 157.5) {
+      direction = 'Bottom-Left';
+      arrow = '↙';
+    } else if (angle >= -67.5 && angle < -22.5) {
+      direction = 'Top-Right';
+      arrow = '↗';
+    } else if (angle >= -112.5 && angle < -67.5) {
+      direction = 'Above';
+      arrow = '↑';
+    } else if (angle >= -157.5 && angle < -112.5) {
+      direction = 'Top-Left';
+      arrow = '↖';
+    } else {
+      direction = 'Left';
+      arrow = '←';
+    }
+
+    return { isOff: true, direction, arrow, worldX, worldY };
+  };
+
+  // Handle incoming remote stroke or element activity from the peer
+  const handleRemoteActivity = (worldX, worldY, senderRole) => {
+    const effectiveSender = senderRole || (role === 'student' ? 'tutor' : 'student');
+    if (senderRole && senderRole === role) {
+      return;
+    }
+
+    lastPeerWritingPos.current = { x: worldX, y: worldY };
+
+    const offInfo = checkIsOffscreen(worldX, worldY);
+    if (offInfo) {
+      const peerTitle = effectiveSender === 'tutor' ? 'Tutor' : 'Student';
+      setPeerOffscreenInfo({ ...offInfo, peerTitle });
+
+      if (peerInactivityTimer.current) clearTimeout(peerInactivityTimer.current);
+      peerInactivityTimer.current = setTimeout(() => {
+        setPeerOffscreenInfo(null);
+      }, 10000);
+    } else {
+      setPeerOffscreenInfo(null);
+    }
+  };
+
+  // Hit test for draggable AI Card Boxes
+  const findHitCard = (wPos) => {
+    // 1. Check Card Box background frames first (from topmost down)
+    for (let i = elementsRef.current.length - 1; i >= 0; i--) {
+      const el = elementsRef.current[i];
+      if (el.isCardBox && el.cardId && el.start && el.end) {
+        const minX = Math.min(el.start.x, el.end.x);
+        const maxX = Math.max(el.start.x, el.end.x);
+        const minY = Math.min(el.start.y, el.end.y);
+        const maxY = Math.max(el.start.y, el.end.y);
+        if (wPos.x >= minX && wPos.x <= maxX && wPos.y >= minY && wPos.y <= maxY) {
+          return el.cardId;
+        }
+      }
+    }
+    // 2. Check any element belonging to a card
+    for (let i = elementsRef.current.length - 1; i >= 0; i--) {
+      const el = elementsRef.current[i];
+      if (el.cardId && hitTestElement(wPos, el, 15)) {
+        return el.cardId;
+      }
+    }
+    return null;
   };
 
   // Capture high-resolution auto-framed whiteboard snapshot for AI analysis
@@ -397,8 +607,147 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     }
   };
 
-  // Expose snapshot extraction handle to parent (for AI telemetry)
+  // Expose snapshot extraction and recentering handles to parent
   useImperativeHandle(ref, () => ({
+    getElements: () => elementsRef.current,
+    recenterOnPeer: (coords) => recenterOnPeer(coords),
+    recenterOnTutor: (coords) => recenterOnPeer(coords),
+    insertGeneratedContent: ({ elements, width, height, position, title, summary }) => {
+      if (!Array.isArray(elements) || elements.length === 0) return [];
+
+      const canvas = canvasRef.current;
+      const rect = canvas ? canvas.getBoundingClientRect() : { width: 960, height: 600 };
+      const curPan = panRef.current || pan;
+      const curZoom = zoomRef.current || zoom;
+
+      const viewportCenterX = (rect.width / 2 - curPan.x) / curZoom;
+      const viewportCenterY = (rect.height / 2 - curPan.y) / curZoom;
+
+      const boxW = width || 540;
+      const boxH = height || 360;
+      const originX = position ? position.x : Math.round(viewportCenterX - boxW / 2);
+      const originY = position ? position.y : Math.round(viewportCenterY - boxH / 2);
+
+      const now = Date.now();
+      const cardId = `card_box_${now}_${Math.random().toString(36).substr(2, 6)}`;
+      const cardTitle = title || '✨ AI Whiteboard Exercise';
+
+      // Find if an element is the card background rectangle
+      const bgIdx = elements.findIndex(el =>
+        el.type === 'shape' && el.shapeType === 'rectangle' &&
+        (el.start?.x ?? 0) <= 10 && (el.start?.y ?? 0) <= 10 &&
+        (el.end?.x ?? 0) >= boxW - 50
+      );
+
+      const preparedElements = [];
+
+      // Add Card Box container
+      if (bgIdx !== -1) {
+        const bgItem = elements[bgIdx];
+        preparedElements.push({
+          ...bgItem,
+          id: bgItem.id || `${cardId}_bg`,
+          cardId,
+          isCardBox: true,
+          cardTitle,
+          cardSummary: summary || '',
+          start: {
+            x: originX,
+            y: originY
+          },
+          end: {
+            x: originX + boxW,
+            y: originY + boxH
+          },
+          color: bgItem.color || '#cbd5e1',
+          fillColor: bgItem.fillColor || '#ffffff',
+          size: 2,
+          role,
+          clientId
+        });
+      } else {
+        preparedElements.push({
+          id: `${cardId}_bg`,
+          type: 'shape',
+          shapeType: 'rectangle',
+          cardId,
+          isCardBox: true,
+          cardTitle,
+          cardSummary: summary || '',
+          start: {
+            x: originX,
+            y: originY
+          },
+          end: {
+            x: originX + boxW,
+            y: originY + boxH
+          },
+          color: '#cbd5e1',
+          fillColor: '#ffffff',
+          size: 2,
+          role,
+          clientId
+        });
+      }
+
+      // Add child elements
+      elements.forEach((item, index) => {
+        if (index === bgIdx) return;
+        const id = item.id || `ai_el_${now}_${index}`;
+        if (item.type === 'shape') {
+          preparedElements.push({
+            ...item,
+            id,
+            cardId,
+            start: {
+              x: originX + (item.start?.x ?? 0),
+              y: originY + (item.start?.y ?? 0)
+            },
+            end: {
+              x: originX + (item.end?.x ?? 0),
+              y: originY + (item.end?.y ?? 0)
+            },
+            role,
+            clientId
+          });
+        } else if (item.type === 'text') {
+          preparedElements.push({
+            ...item,
+            id,
+            cardId,
+            x: originX + (item.x ?? 0),
+            y: originY + (item.y ?? 0),
+            maxWidth: item.maxWidth || Math.max(260, boxW - (item.x ?? 0) - 20),
+            role,
+            clientId
+          });
+        } else {
+          preparedElements.push({ ...item, id, cardId, role, clientId });
+        }
+      });
+
+      for (const el of preparedElements) {
+        elementsRef.current.push(el);
+        undoStackRef.current.push({ type: 'add', element: el });
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'whiteboard_element',
+            element: el,
+            role,
+            clientId
+          }));
+        }
+      }
+
+      // Automatically switch to moving object mode so the tutor can immediately drag and drop
+      setPrevTool(tool);
+      setTool('move');
+
+      updateHistoryState();
+      redrawAll();
+      triggerSnapshotDispatch();
+      return preparedElements;
+    },
     getSnapshot: captureSnapshot,
     clearBoard: () => {
       handleClear(true);
@@ -406,8 +755,8 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     insertVisualExample: (exampleType = 'fraction_pizza') => {
       const canvas = canvasRef.current;
       const rect = canvas ? canvas.getBoundingClientRect() : { width: 800, height: 600 };
-      const cx = Math.round((-pan.x + rect.width / 2) / zoom);
-      const cy = Math.round((-pan.y + rect.height / 2) / zoom);
+      const cx = Math.round((-panRef.current.x + rect.width / 2) / zoomRef.current);
+      const cy = Math.round((-panRef.current.y + rect.height / 2) / zoomRef.current);
 
       const newElements = [];
       const now = Date.now();
@@ -954,10 +1303,27 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     return () => window.removeEventListener('resize', resizeCanvas);
   }, []);
 
-  // Redraw when camera transform changes (zoom, pan)
+  // Redraw and update offscreen indicator when camera transform changes (zoom, pan)
   useEffect(() => {
     redrawAll();
+
+    if (peerOffscreenInfo && lastPeerWritingPos.current) {
+      const stillOff = checkIsOffscreen(lastPeerWritingPos.current.x, lastPeerWritingPos.current.y);
+      if (!stillOff) {
+        setPeerOffscreenInfo(null);
+      } else {
+        setPeerOffscreenInfo(prev => prev ? { ...prev, direction: stillOff.direction, arrow: stillOff.arrow } : null);
+      }
+    }
   }, [zoom, pan]);
+
+  // Clean up camera animation and peer timer on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraAnimRef.current) cancelAnimationFrame(cameraAnimRef.current);
+      if (peerInactivityTimer.current) clearTimeout(peerInactivityTimer.current);
+    };
+  }, []);
 
   // Listen for remote strokes and actions
   useEffect(() => {
@@ -971,8 +1337,26 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'whiteboard_stroke') {
+        if (data.type === 'whiteboard_init' || data.type === 'whiteboard_sync') {
+          if (Array.isArray(data.elements)) {
+            elementsRef.current = [...data.elements];
+            redrawAll();
+          }
+        } else if (data.type === 'whiteboard_stroke') {
           drawRemoteStroke(data.stroke);
+
+          const canvas = canvasRef.current;
+          const rect = canvas ? canvas.getBoundingClientRect() : { width: 960, height: 600 };
+          const w = rect.width > 0 ? rect.width : 960;
+          const h = rect.height > 0 ? rect.height : 600;
+          const stroke = data.stroke;
+          const wX = stroke.isWorld
+            ? (stroke.x1 !== undefined ? stroke.x1 : stroke.x0)
+            : ((stroke.x1 !== undefined ? stroke.x1 : stroke.x0) * w);
+          const wY = stroke.isWorld
+            ? (stroke.y1 !== undefined ? stroke.y1 : stroke.y0)
+            : ((stroke.y1 !== undefined ? stroke.y1 : stroke.y0) * h);
+          handleRemoteActivity(wX, wY, data.role);
         } else if (data.type === 'whiteboard_element') {
           const idx = elementsRef.current.findIndex(el => el.id === data.element.id);
           if (idx !== -1) {
@@ -981,6 +1365,21 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
             elementsRef.current.push(data.element);
           }
           redrawAll();
+
+          const el = data.element;
+          let wX = null, wY = null;
+          if (el.type === 'stroke' && el.points && el.points.length > 0) {
+            const p = el.points[el.points.length - 1];
+            wX = p.x; wY = p.y;
+          } else if (el.start && el.end) {
+            wX = (el.start.x + el.end.x) / 2;
+            wY = (el.start.y + el.end.y) / 2;
+          } else if (el.x !== undefined && el.y !== undefined) {
+            wX = el.x; wY = el.y;
+          }
+          if (wX !== null && wY !== null) {
+            handleRemoteActivity(wX, wY, data.role || el.role);
+          }
         } else if (data.type === 'whiteboard_sync_full') {
           // Late-joiner or full synchronization from server / peer
           if (Array.isArray(data.elements)) {
@@ -1003,6 +1402,19 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     };
 
     socket.addEventListener('message', handleMessage);
+
+    // Request active whiteboard state from server upon connecting/mounting
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'request_whiteboard_sync' }));
+    } else {
+      const handleOpen = () => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'request_whiteboard_sync' }));
+        }
+      };
+      socket.addEventListener('open', handleOpen, { once: true });
+    }
+
     return () => socket.removeEventListener('message', handleMessage);
   }, [socket]);
 
@@ -1120,7 +1532,97 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       const width = Math.abs(end.x - start.x);
       const height = Math.abs(end.y - start.y);
 
+      // AI Draggable Card Box format
+      if (el.isCardBox) {
+        ctx.save();
+        const r = 12;
+
+        // Card Drop Shadow & Card Frame
+        ctx.shadowColor = 'rgba(15, 23, 42, 0.08)';
+        ctx.shadowBlur = 12;
+        ctx.shadowOffsetY = 4;
+        ctx.fillStyle = el.fillColor || '#ffffff';
+        ctx.strokeStyle = el.color || '#cbd5e1';
+        ctx.lineWidth = el.size || 2;
+
+        ctx.beginPath();
+        drawRoundRect(ctx, minX, minY, width, height, r);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.shadowColor = 'transparent';
+
+        // Top Drag Header Bar
+        const headerH = 34;
+        ctx.fillStyle = '#f8fafc';
+        ctx.beginPath();
+        drawRoundRect(ctx, minX, minY, width, headerH, [r, r, 0, 0]);
+        ctx.fill();
+
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(minX, minY + headerH);
+        ctx.lineTo(minX + width, minY + headerH);
+        ctx.stroke();
+
+        // Card Header Title
+        ctx.fillStyle = '#1e3a8a';
+        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        const rawTitle = el.cardTitle || '✨ AI Whiteboard Exercise';
+        const displayTitle = rawTitle.length > 42 ? rawTitle.slice(0, 40) + '...' : rawTitle;
+        ctx.fillText(displayTitle, minX + 14, minY + 22);
+
+        // Drag Pill Badge on Right
+        const pillW = 86;
+        const pillH = 20;
+        const pillX = minX + width - pillW - 10;
+        const pillY = minY + 7;
+        ctx.fillStyle = '#eff6ff';
+        ctx.strokeStyle = '#bfdbfe';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        drawRoundRect(ctx, pillX, pillY, pillW, pillH, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#2563eb';
+        ctx.font = '600 10.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.fillText('✋ Drag Box', pillX + 11, pillY + 14);
+
+        // Highlight active outline when hovered or dragging in moving object mode
+        const isHovered = hoveredCardId === el.cardId;
+        const isDragging = isDraggingCard.current && dragCardId.current === el.cardId;
+        if (isHovered || isDragging) {
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          drawRoundRect(ctx, minX - 4, minY - 4, width + 8, height + 8, r + 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        ctx.restore();
+        return;
+      }
+
       ctx.beginPath();
+      if (el.fillColor) {
+        ctx.fillStyle = el.fillColor;
+        if (sType === 'rectangle') {
+          ctx.fillRect(minX, minY, width, height);
+        } else if (sType === 'circle') {
+          const cx = (start.x + end.x) / 2;
+          const cy = (start.y + end.y) / 2;
+          const rx = width / 2;
+          const ry = height / 2;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
       if (sType === 'rectangle') {
         ctx.strokeRect(minX, minY, width, height);
       } else if (sType === 'circle') {
@@ -1162,8 +1664,45 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       }
     } else if (el.type === 'text') {
       ctx.fillStyle = drawColor || '#0f172a';
-      ctx.font = 'bold 16px monospace';
-      ctx.fillText(el.text, el.x, el.y);
+      const fSize = el.fontSize || 16;
+      const fWeight = el.fontWeight || 'bold';
+      ctx.font = `${fWeight} ${fSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace`;
+
+      const rawText = String(el.text || '');
+      const maxWidth = el.maxWidth || 520;
+      const lineHeight = Math.round(fSize * 1.35);
+
+      const rawLines = rawText.split('\n');
+      let lineY = el.y;
+
+      for (const rawLine of rawLines) {
+        if (!rawLine) {
+          lineY += lineHeight;
+          continue;
+        }
+
+        if (ctx.measureText(rawLine).width <= maxWidth) {
+          ctx.fillText(rawLine, el.x, lineY);
+          lineY += lineHeight;
+        } else {
+          const words = rawLine.split(' ');
+          let currentLine = '';
+          for (let n = 0; n < words.length; n++) {
+            const testLine = currentLine ? `${currentLine} ${words[n]}` : words[n];
+            if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+              ctx.fillText(currentLine, el.x, lineY);
+              currentLine = words[n];
+              lineY += lineHeight;
+            } else {
+              currentLine = testLine;
+            }
+          }
+          if (currentLine) {
+            ctx.fillText(currentLine, el.x, lineY);
+            lineY += lineHeight;
+          }
+        }
+      }
     }
 
     ctx.restore();
@@ -1230,6 +1769,30 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         }
       }
       redoStackRef.current.push({ type: 'batch_delete', items: restoredItems });
+    } else if (action.type === 'move_card') {
+      // Undo move_card -> restore previous element positions and broadcast
+      const elementMap = new Map(action.prevElements.map(el => [el.id, el]));
+      elementsRef.current = elementsRef.current.map(el => {
+        if (elementMap.has(el.id)) {
+          const restored = JSON.parse(JSON.stringify(elementMap.get(el.id)));
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'whiteboard_element',
+              element: restored,
+              role,
+              clientId
+            }));
+          }
+          return restored;
+        }
+        return el;
+      });
+      redoStackRef.current.push({
+        type: 'move_card',
+        cardId: action.cardId,
+        prevElements: action.prevElements,
+        nextElements: action.nextElements
+      });
     }
 
     updateHistoryState();
@@ -1290,6 +1853,30 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           clientId
         }));
       }
+    } else if (action.type === 'move_card') {
+      // Redo move_card -> re-apply new element positions and broadcast
+      const elementMap = new Map(action.nextElements.map(el => [el.id, el]));
+      elementsRef.current = elementsRef.current.map(el => {
+        if (elementMap.has(el.id)) {
+          const restored = JSON.parse(JSON.stringify(elementMap.get(el.id)));
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'whiteboard_element',
+              element: restored,
+              role,
+              clientId
+            }));
+          }
+          return restored;
+        }
+        return el;
+      });
+      undoStackRef.current.push({
+        type: 'move_card',
+        cardId: action.cardId,
+        prevElements: action.prevElements,
+        nextElements: action.nextElements
+      });
     }
 
     updateHistoryState();
@@ -1305,13 +1892,16 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
 
-    const { x0, y0, x1, y1, cx, cy, isDot, color: sColor, size: sSize, tool: sTool } = stroke;
+    const { x0, y0, x1, y1, cx, cy, isDot, color: sColor, size: sSize, tool: sTool, isWorld } = stroke;
+
+    const curPan = panRef.current;
+    const curZoom = zoomRef.current;
 
     if (ctx.save) ctx.save();
     if (ctx.setTransform) ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (ctx.scale) ctx.scale(dpr, dpr);
-    if (ctx.translate) ctx.translate(pan.x, pan.y);
-    if (ctx.scale) ctx.scale(zoom, zoom);
+    if (ctx.translate) ctx.translate(curPan.x, curPan.y);
+    if (ctx.scale) ctx.scale(curZoom, curZoom);
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -1333,19 +1923,26 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       ctx.globalAlpha = 1.0;
     }
 
+    const p0x = isWorld ? x0 : (x0 * w);
+    const p0y = isWorld ? y0 : (y0 * h);
+    const p1x = isWorld ? x1 : (x1 * w);
+    const p1y = isWorld ? y1 : (y1 * h);
+    const pcx = cx !== undefined ? (isWorld ? cx : cx * w) : undefined;
+    const pcy = cy !== undefined ? (isWorld ? cy : cy * h) : undefined;
+
     if (isDot) {
       ctx.beginPath();
-      ctx.arc(x0, y0, (sTool === 'eraser' ? sSize * 1.75 : sSize / 2), 0, Math.PI * 2);
+      ctx.arc(p0x, p0y, (sTool === 'eraser' ? sSize * 1.75 : sSize / 2), 0, Math.PI * 2);
       ctx.fill();
-    } else if (cx !== undefined && cy !== undefined) {
+    } else if (pcx !== undefined && pcy !== undefined) {
       ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.quadraticCurveTo(cx, cy, x1, y1);
+      ctx.moveTo(p0x, p0y);
+      ctx.quadraticCurveTo(pcx, pcy, p1x, p1y);
       ctx.stroke();
     } else {
       ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
+      ctx.moveTo(p0x, p0y);
+      ctx.lineTo(p1x, p1y);
       ctx.stroke();
     }
     ctx.restore();
@@ -1505,11 +2102,14 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
 
+    const curPan = panRef.current;
+    const curZoom = zoomRef.current;
+
     if (ctx.save) ctx.save();
     if (ctx.setTransform) ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (ctx.scale) ctx.scale(dpr, dpr);
-    if (ctx.translate) ctx.translate(pan.x, pan.y);
-    if (ctx.scale) ctx.scale(zoom, zoom);
+    if (ctx.translate) ctx.translate(curPan.x, curPan.y);
+    if (ctx.scale) ctx.scale(curZoom, curZoom);
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -1546,7 +2146,8 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         size,
         tool,
         role,
-        clientId
+        clientId,
+        isWorld: true
       });
     }
   };
@@ -1580,12 +2181,38 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     const sPos = getScreenPos(e);
     const wPos = toWorld(sPos.x, sPos.y);
 
-    // Hand tool (Pan)
-    if (tool === 'hand' || e.button === 1 || e.spaceKey) {
+    // Moving Object Mode / Hand tool (Drag Card Box or Pan Board)
+    if (tool === 'move' || tool === 'hand') {
+      const hitCardId = findHitCard(wPos);
+      if (hitCardId) {
+        isDraggingCard.current = true;
+        dragCardId.current = hitCardId;
+        dragStartPos.current = { x: wPos.x, y: wPos.y };
+        const initMap = new Map();
+        elementsRef.current.forEach(el => {
+          if (el.cardId === hitCardId) {
+            initMap.set(el.id, JSON.parse(JSON.stringify(el)));
+          }
+        });
+        dragInitialPositions.current = initMap;
+        redrawAll();
+        return;
+      }
+      // If no card is hit, pan the canvas
       isPanning.current = true;
       panStart.current = {
-        x: e.clientX - pan.x,
-        y: e.clientY - pan.y
+        x: e.clientX - panRef.current.x,
+        y: e.clientY - panRef.current.y
+      };
+      return;
+    }
+
+    // Space key or middle-click Pan
+    if (e.button === 1 || e.spaceKey) {
+      isPanning.current = true;
+      panStart.current = {
+        x: e.clientX - panRef.current.x,
+        y: e.clientY - panRef.current.y
       };
       return;
     }
@@ -1672,8 +2299,41 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     }
 
     const sPos = getScreenPos(e);
+    const wPos = toWorld(sPos.x, sPos.y);
 
-    // Panning with Hand tool
+    // Dragging AI Card Box in Moving Object Mode
+    if (isDraggingCard.current && dragCardId.current) {
+      const dx = wPos.x - dragStartPos.current.x;
+      const dy = wPos.y - dragStartPos.current.y;
+      const initMap = dragInitialPositions.current;
+
+      elementsRef.current = elementsRef.current.map(el => {
+        if (el.cardId === dragCardId.current && initMap.has(el.id)) {
+          const initEl = initMap.get(el.id);
+          const updated = { ...el };
+
+          if (initEl.type === 'shape' && initEl.start && initEl.end) {
+            updated.start = { x: Math.round(initEl.start.x + dx), y: Math.round(initEl.start.y + dy) };
+            updated.end = { x: Math.round(initEl.end.x + dx), y: Math.round(initEl.end.y + dy) };
+          } else if (initEl.type === 'text') {
+            updated.x = Math.round(initEl.x + dx);
+            updated.y = Math.round(initEl.y + dy);
+          } else if (initEl.type === 'stroke' && Array.isArray(initEl.points)) {
+            updated.points = initEl.points.map(pt => ({
+              x: Math.round(pt.x + dx),
+              y: Math.round(pt.y + dy)
+            }));
+          }
+          return updated;
+        }
+        return el;
+      });
+
+      redrawAll();
+      return;
+    }
+
+    // Panning with Hand tool or empty canvas drag in Move mode
     if (isPanning.current) {
       setPan({
         x: e.clientX - panStart.current.x,
@@ -1682,8 +2342,19 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       return;
     }
 
+    // Hover state tracking for AI Card Box in Move / Hand mode
+    if ((tool === 'move' || tool === 'hand') && !isDraggingCard.current && !isPanning.current) {
+      const hitCardId = findHitCard(wPos);
+      if (hitCardId !== hoveredCardId) {
+        setHoveredCardId(hitCardId);
+        redrawAll();
+      }
+    } else if (hoveredCardId && tool !== 'move' && tool !== 'hand') {
+      setHoveredCardId(null);
+      redrawAll();
+    }
+
     if (!isDrawing.current) return;
-    const wPos = toWorld(sPos.x, sPos.y);
 
     // Stroke Eraser (Sweep to delete)
     // As the user sweeps across lines without releasing, any stroke touched is deleted!
@@ -1797,6 +2468,61 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       if (activeTouches.current.size < 2) {
         isTwoFingerNavigating.current = false;
         touchNavStart.current = null;
+      }
+      return;
+    }
+
+    // Finalize Card Box Drag & Drop in Moving Object Mode
+    if (isDraggingCard.current) {
+      isDraggingCard.current = false;
+      const cardId = dragCardId.current;
+      dragCardId.current = null;
+
+      if (cardId) {
+        const initMap = dragInitialPositions.current;
+        const initialElements = Array.from(initMap.values());
+        const currentElements = elementsRef.current.filter(el => el.cardId === cardId);
+
+        let hasMovedCard = false;
+        for (const cur of currentElements) {
+          const init = initMap.get(cur.id);
+          if (init) {
+            if (init.type === 'shape' && (init.start?.x !== cur.start?.x || init.start?.y !== cur.start?.y || init.end?.x !== cur.end?.x || init.end?.y !== cur.end?.y)) {
+              hasMovedCard = true;
+              break;
+            } else if (init.type === 'text' && (init.x !== cur.x || init.y !== cur.y)) {
+              hasMovedCard = true;
+              break;
+            } else if (init.type === 'stroke' && init.points?.[0] && cur.points?.[0] && (init.points[0].x !== cur.points[0].x || init.points[0].y !== cur.points[0].y)) {
+              hasMovedCard = true;
+              break;
+            }
+          }
+        }
+
+        if (hasMovedCard) {
+          pushUndoAction({
+            type: 'move_card',
+            cardId,
+            prevElements: initialElements,
+            nextElements: JSON.parse(JSON.stringify(currentElements))
+          });
+
+          // Broadcast all updated elements across WebSocket so peer is in sync
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            for (const el of currentElements) {
+              socket.send(JSON.stringify({
+                type: 'whiteboard_element',
+                element: el,
+                role,
+                clientId
+              }));
+            }
+          }
+        }
+
+        dragInitialPositions.current = new Map();
+        redrawAll();
       }
       return;
     }
@@ -1925,7 +2651,8 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           size,
           tool,
           role,
-          clientId
+          clientId,
+          isWorld: true
         });
       }
     } else if (hasMoved.current && lastDrawnPos.current && pts.length >= 2) {
@@ -1965,7 +2692,8 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           size,
           tool,
           role,
-          clientId
+          clientId,
+          isWorld: true
         });
       }
     }
@@ -1985,16 +2713,18 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (e.ctrlKey) {
       // Intentional pinch-to-zoom on trackpad or Ctrl + Wheel zoom
       const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
-      const newZoom = Math.max(0.25, Math.min(4.0, Math.round(zoom * zoomFactor * 100) / 100));
-      if (newZoom === zoom) return;
+      const curZoom = zoomRef.current;
+      const curPan = panRef.current;
+      const newZoom = Math.max(0.25, Math.min(4.0, Math.round(curZoom * zoomFactor * 100) / 100));
+      if (newZoom === curZoom) return;
 
       const rect = canvas.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
       const mouseY = e.clientY - rect.top;
 
       // Zoom towards cursor location
-      const newPanX = mouseX - (mouseX - pan.x) * (newZoom / zoom);
-      const newPanY = mouseY - (mouseY - pan.y) * (newZoom / zoom);
+      const newPanX = mouseX - (mouseX - curPan.x) * (newZoom / curZoom);
+      const newPanY = mouseY - (mouseY - curPan.y) * (newZoom / curZoom);
 
       setZoom(newZoom);
       setPan({ x: newPanX, y: newPanY });
@@ -2059,7 +2789,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         overflow: 'visible',
         whiteSpace: 'nowrap'
       }}>
-        {/* Basic Tools (Pen, Highlighter, Hand) */}
+        {/* Basic Tools (Pen, Moving Object Mode, Highlighter) */}
         <div style={{ display: 'flex', gap: '2px', background: '#f8fafc', padding: '2px', borderRadius: '8px', border: '1px solid #e2e8f0', flexShrink: 0 }}>
           <button 
             onClick={() => setTool('pen')}
@@ -2078,6 +2808,29 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           </button>
 
           <button 
+            onClick={() => {
+              if (tool !== 'move') {
+                setPrevTool(tool);
+                setTool('move');
+              } else {
+                setTool(prevTool || 'pen');
+              }
+            }}
+            title="Moving Object Mode (Hand - Drag & Drop Content / Pan)"
+            style={{
+              padding: '5px 8px',
+              borderRadius: '6px',
+              background: tool === 'move' ? '#2563eb' : 'transparent',
+              color: tool === 'move' ? '#ffffff' : '#64748b',
+              border: 'none',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center'
+            }}>
+            <Hand size={16} />
+          </button>
+
+          <button 
             onClick={() => setTool('highlighter')}
             title="Highlighter"
             style={{
@@ -2091,30 +2844,6 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
               alignItems: 'center'
             }}>
             <Highlighter size={16} />
-          </button>
-
-          <button 
-            onClick={() => {
-              if (tool !== 'hand') {
-                setPrevTool(tool);
-                setTool('hand');
-              } else {
-                setTool(prevTool || 'pen');
-              }
-            }}
-            title="Hand (Pan Board)"
-            style={{
-              padding: '5px 8px',
-              borderRadius: '6px',
-              background: tool === 'hand' ? '#2563eb' : 'transparent',
-              color: tool === 'hand' ? '#ffffff' : '#64748b',
-              border: 'none',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px'
-            }}>
-            <Hand size={16} />
           </button>
         </div>
 
@@ -2418,7 +3147,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         </div>
 
         {/* Color Palette + Paint.NET Style Square Color Picker */}
-        {tool !== 'eraser' && tool !== 'stroke-eraser' && tool !== 'lasso-eraser' && tool !== 'hand' && (
+        {tool !== 'eraser' && tool !== 'stroke-eraser' && tool !== 'lasso-eraser' && tool !== 'hand' && tool !== 'move' && (
           <div data-dropdown-container="true" style={{ display: 'flex', gap: '4px', alignItems: 'center', position: 'relative', flexShrink: 0 }}>
             {PRESET_COLORS.map((c) => (
               <button
@@ -2474,7 +3203,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         )}
 
         {/* Continuous Pen Width Slider */}
-        {tool !== 'hand' && (
+        {tool !== 'hand' && tool !== 'move' && (
           <div style={{ display: 'flex', gap: '5px', alignItems: 'center', padding: '2px 6px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', flexShrink: 0 }}>
             <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b' }}>Size:</span>
             <input
@@ -2579,7 +3308,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           height: '100%',
           overflow: 'hidden',
           touchAction: 'none',
-          cursor: tool === 'hand' ? (isPanning.current ? 'grabbing' : 'grab') : tool === 'stroke-eraser' ? 'crosshair' : tool === 'lasso-eraser' ? 'crosshair' : tool === 'eraser' ? 'cell' : 'crosshair'
+          cursor: (tool === 'move' || tool === 'hand') 
+            ? (isDraggingCard.current || isPanning.current ? 'grabbing' : (hoveredCardId ? 'grab' : 'grab')) 
+            : tool === 'stroke-eraser' ? 'crosshair' 
+            : tool === 'lasso-eraser' ? 'crosshair' 
+            : tool === 'eraser' ? 'cell' 
+            : 'crosshair'
         }}>
         <canvas
           ref={canvasRef}
@@ -2674,6 +3408,91 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           )}
         </svg>
 
+        {/* Floating Off-Screen Activity Notification Pill */}
+        {peerOffscreenInfo && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '16px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 35,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              padding: '7px 14px',
+              backgroundColor: '#1e293b',
+              color: '#ffffff',
+              borderRadius: '24px',
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0,0,0,0.12)',
+              border: '1px solid #334155',
+              fontSize: '13px',
+              fontWeight: 500,
+              pointerEvents: 'auto',
+              userSelect: 'none',
+              animation: 'slideDownFade 0.22s ease-out'
+            }}>
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: '#38bdf8',
+                boxShadow: '0 0 8px #38bdf8',
+                display: 'inline-block',
+                animation: 'pulseDot 1.5s infinite ease-in-out'
+              }}
+            />
+
+            <span>
+              <strong style={{ fontWeight: 600, color: '#f8fafc' }}>
+                {peerOffscreenInfo.peerTitle || (role === 'student' ? 'Tutor' : 'Student')}
+              </strong> is writing ({peerOffscreenInfo.direction} {peerOffscreenInfo.arrow})
+            </span>
+
+            <button
+              onClick={() => recenterOnPeer(peerOffscreenInfo)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '4px 10px',
+                backgroundColor: '#2563eb',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '14px',
+                fontSize: '12px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'background-color 0.15s ease'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; }}>
+              Jump to view
+              <span style={{ fontSize: '13px' }}>↗</span>
+            </button>
+
+            <button
+              onClick={() => setPeerOffscreenInfo(null)}
+              title="Dismiss notification"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '2px',
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                borderRadius: '50%'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = '#ffffff'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = '#94a3b8'; }}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Floating Zoom & Pan HUD at bottom-right */}
         <div style={{
           position: 'absolute',
@@ -2755,6 +3574,35 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
               cursor: 'pointer'
             }}>
             <Hand size={16} />
+          </button>
+
+          <div style={{ width: '1px', height: '18px', background: '#e2e8f0', margin: '0 2px' }} />
+
+          <button
+            onClick={() => recenterOnPeer()}
+            title={`Recenter view on ${role === 'student' ? 'Tutor' : 'Student'}'s work`}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 10px',
+              borderRadius: '6px',
+              border: 'none',
+              background: '#eff6ff',
+              color: '#2563eb',
+              fontSize: '12px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#dbeafe';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#eff6ff';
+            }}>
+            <Target size={15} style={{ color: '#2563eb' }} />
+            <span>{role === 'student' ? 'Recenter on Tutor' : 'Recenter on Student'}</span>
           </button>
         </div>
 
