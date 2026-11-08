@@ -1,22 +1,51 @@
-import React, { useState } from 'react';
-import { BookOpen, X, Sparkles, ChevronRight, CheckCircle2, AlertCircle, Clock } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { BookOpen, X, Sparkles, ChevronRight, CheckCircle2, AlertCircle, Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 
 /**
  * CoachNotebook
  * Right-edge collapsible tab and drawer for the tutor.
- * - Tab: Sits quietly on the right border with an unread badge ("📓 2").
- * - Drawer: Opens on tap without obstructing the lesson, showing a chronological timeline
- *   and top takeaways.
+ * - Tab: Sits quietly on the right border.
+ * - Drawer: Opens on tap without obstructing the lesson.
+ * - Live Coach Notes: Displays 2 Positives & 2 Negatives updated in real-time every 2 minutes.
  */
 export default function CoachNotebook({
   isOpen,
   onToggle,
-  entries = [],
-  topTakeaways = [],
+  coachNotes = null,
   onOpenFullReport,
   onApplyExample
 }) {
-  const unreadCount = entries.filter(e => !e.read).length;
+  const [timeTick, setTimeTick] = useState(Date.now());
+
+  // Periodically re-render relative time label
+  useEffect(() => {
+    if (!isOpen) return;
+    const interval = setInterval(() => setTimeTick(Date.now()), 10000);
+    return () => clearInterval(interval);
+  }, [isOpen]);
+
+  const getTimeAgo = (ts) => {
+    if (!ts) return 'Awaiting first 2m sync';
+    const diffSec = Math.floor((Date.now() - ts) / 1000);
+    if (diffSec < 15) return 'Just now';
+    if (diffSec < 60) return `${diffSec}s ago`;
+    const mins = Math.floor(diffSec / 60);
+    return `${mins}m ago`;
+  };
+
+  const positives = coachNotes?.positives?.length > 0
+    ? coachNotes.positives.slice(0, 2)
+    : [
+        'Balanced conversational tone with responsive pupil participation.',
+        'Whiteboard workspace actively initialized for shared learning.'
+      ];
+
+  const negatives = coachNotes?.negatives?.length > 0
+    ? coachNotes.negatives.slice(0, 2)
+    : [
+        'Ensure wait time of 3–5 seconds after asking questions to prevent rushing.',
+        'Encourage the student to write their own intermediate steps on the canvas.'
+      ];
 
   return (
     <>
@@ -62,23 +91,6 @@ export default function CoachNotebook({
           }}>
             NOTEBOOK
           </span>
-          {unreadCount > 0 && (
-            <span style={{
-              width: '18px',
-              height: '18px',
-              borderRadius: '50%',
-              backgroundColor: '#ef4444',
-              color: '#ffffff',
-              fontSize: '10px',
-              fontWeight: 800,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 8px rgba(239, 68, 68, 0.6)'
-            }}>
-              {unreadCount}
-            </span>
-          )}
         </button>
       )}
 
@@ -114,7 +126,7 @@ export default function CoachNotebook({
                   Coach Notebook
                 </h3>
                 <p style={{ fontSize: '11px', color: '#94a3b8', margin: '2px 0 0 0' }}>
-                  Live observations & timeline
+                  Live observations & notes
                 </p>
               </div>
             </div>
@@ -136,197 +148,127 @@ export default function CoachNotebook({
 
           {/* Body Content */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {/* Top Takeaways Block */}
+            
+            {/* Live Coach Notes: 2 Positives & 2 Negatives (Updated every 2 min) */}
             <div style={{
               backgroundColor: '#1e293b',
-              borderRadius: '10px',
+              borderRadius: '12px',
               padding: '14px',
-              border: '1px solid #334155'
+              border: '1px solid #334155',
+              boxShadow: '0 4px 14px rgba(0,0,0,0.25)'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
-                <Sparkles size={14} color="#a855f7" />
-                <span style={{ fontSize: '11px', fontWeight: 700, color: '#c084fc', textTransform: 'uppercase' }}>
-                  Top Takeaways
-                </span>
-              </div>
-              <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', color: '#e2e8f0', lineHeight: 1.5 }}>
-                {topTakeaways.length > 0 ? (
-                  topTakeaways.map((t, idx) => (
-                    <li key={idx} style={{ marginBottom: '6px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-                      <span style={{ flex: 1 }}>{t}</span>
-                      {onApplyExample && (
-                        <button
-                          onClick={() => {
-                            const isFraction = t.toLowerCase().includes('fraction') || t.toLowerCase().includes('pizza');
-                            const isNumberLine = t.toLowerCase().includes('number line');
-                            const exampleType = isFraction ? 'fraction_pizza' : (isNumberLine ? 'number_line' : 'nudge_hint');
-                            onApplyExample(exampleType, {
-                              title: '💡 Takeaway Visual Scaffold',
-                              toast_text: t,
-                              action_label: 'Explore visual representation'
-                            });
-                          }}
-                          title="Drop visual scaffold onto whiteboard"
-                          style={{
-                            padding: '2px 7px',
-                            borderRadius: '5px',
-                            backgroundColor: '#059669',
-                            color: '#ffffff',
-                            fontSize: '10px',
-                            fontWeight: 700,
-                            border: 'none',
-                            cursor: 'pointer',
-                            whiteSpace: 'nowrap',
-                            boxShadow: '0 1px 3px rgba(5, 150, 105, 0.3)'
-                          }}
-                        >
-                          ✋ Drop
-                        </button>
-                      )}
-                    </li>
-                  ))
-                ) : (
-                  <>
-                    <li style={{ marginBottom: '4px' }}>Fractions division: Favor visual representations (pizza, number line).</li>
-                    <li>Student responds rapidly when given a concrete example first.</li>
-                  </>
-                )}
-              </ul>
-            </div>
-
-            {/* Timeline Log */}
-            <div>
-              <div style={{ fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: '10px' }}>
-                Session Timeline ({entries.length})
+              {/* Header with 2m live sync badge */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Sparkles size={14} color="#a855f7" />
+                  <span style={{ fontSize: '11px', fontWeight: 800, color: '#c084fc', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    Live Coach Notes
+                  </span>
+                </div>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                  borderRadius: '12px',
+                  padding: '2px 8px',
+                  fontSize: '10px',
+                  color: '#6ee7b7',
+                  fontWeight: 600
+                }}>
+                  <span style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    backgroundColor: '#10b981',
+                    boxShadow: '0 0 6px #10b981'
+                  }} />
+                  <span>2m Sync • {getTimeAgo(coachNotes?.lastUpdated)}</span>
+                </div>
               </div>
 
-              {entries.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '30px 10px', color: '#64748b', fontSize: '12px' }}>
-                  No alerts or nudges yet. The session is quiet and running smoothly.
+              {/* 🟢 2 Positives */}
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: '#4ade80',
+                  textTransform: 'uppercase',
+                  marginBottom: '6px',
+                  letterSpacing: '0.03em'
+                }}>
+                  <CheckCircle2 size={13} color="#4ade80" />
+                  <span>2 Positives (What's Going Well)</span>
                 </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {entries.map((entry, idx) => {
-                    const isT3 = entry.tier === 'T3';
-                    const isT2 = entry.tier === 'T2';
-                    const icon = isT3 ? '🔴' : isT2 ? '🟡' : '🟢';
-                    const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {positives.map((text, idx) => (
+                    <div
+                      key={`pos_${idx}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '8px',
+                        backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                        border: '1px solid rgba(16, 185, 129, 0.25)',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        fontSize: '12px',
+                        color: '#f0fdf4',
+                        lineHeight: 1.4
+                      }}
+                    >
+                      <span style={{ color: '#22c55e', fontSize: '12px', fontWeight: 700, flexShrink: 0 }}>✓</span>
+                      <span style={{ flex: 1 }}>{text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
 
-                    return (
-                      <div
-                        key={idx}
-                        style={{
-                          backgroundColor: '#1e293b',
-                          borderRadius: '8px',
-                          padding: '10px 12px',
-                          border: `1px solid ${isT3 ? 'rgba(239, 68, 68, 0.3)' : 'rgba(51, 65, 85, 0.7)'}`,
-                          fontSize: '12px',
-                          color: '#f8fafc',
-                          lineHeight: 1.4
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
-                          <span style={{ fontWeight: 600, color: isT3 ? '#fca5a5' : isT2 ? '#fde68a' : '#86efac' }}>
-                            {icon} {entry.category || 'Observation'}
-                          </span>
-                          <span style={{ fontSize: '10px', color: '#64748b' }}>{time}</span>
-                        </div>
-                        <div style={{ color: '#cbd5e1' }}>
-                          {entry.text}
-                        </div>
-                        {entry.suggestion ? (
-                          <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                            <div style={{ fontSize: '11px', color: '#38bdf8', fontStyle: 'italic', flex: 1 }}>
-                              💡 {entry.suggestion}
-                            </div>
-                            {onApplyExample && (
-                              <div style={{ display: 'flex', gap: '4px' }}>
-                                {(entry.stepping_stone || entry.text) && (
-                                  <button
-                                    onClick={() => onApplyExample({ type: 'ai_steps', text: entry.stepping_stone || entry.text }, entry)}
-                                    title="Show AI step-by-step breakdown on the shared whiteboard"
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '3px',
-                                      padding: '3px 8px',
-                                      borderRadius: '5px',
-                                      backgroundColor: '#0284c7',
-                                      color: '#ffffff',
-                                      fontSize: '10.5px',
-                                      fontWeight: 700,
-                                      border: 'none',
-                                      cursor: 'pointer',
-                                      whiteSpace: 'nowrap',
-                                      boxShadow: '0 1px 4px rgba(2, 132, 199, 0.3)'
-                                    }}
-                                  >
-                                    <span>📋 Show Steps</span>
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
-                                    title: `💡 Coach Tip: ${entry.category || 'Guidance'}`,
-                                    action_label: entry.suggestion,
-                                    toast_text: entry.text,
-                                    ...entry
-                                  })}
-                                  title="Drop this guidance onto whiteboard as a draggable card"
-                                  style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '3px',
-                                    padding: '3px 8px',
-                                    borderRadius: '5px',
-                                    backgroundColor: '#059669',
-                                    color: '#ffffff',
-                                    fontSize: '10.5px',
-                                    fontWeight: 700,
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    whiteSpace: 'nowrap',
-                                    boxShadow: '0 1px 4px rgba(5, 150, 105, 0.3)'
-                                  }}
-                                >
-                                  <span>✋ Drop</span>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ) : onApplyExample && (
-                          <div style={{ marginTop: '6px', display: 'flex', justifyContent: 'flex-end' }}>
-                            <button
-                              onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
-                                title: `💡 Coach Observation: ${entry.category || 'Note'}`,
-                                toast_text: entry.text,
-                                ...entry
-                              })}
-                              title="Drop this observation onto whiteboard as a draggable card"
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                padding: '2px 7px',
-                                borderRadius: '5px',
-                                backgroundColor: '#334155',
-                                color: '#e2e8f0',
-                                fontSize: '10px',
-                                fontWeight: 600,
-                                border: '1px solid #475569',
-                                cursor: 'pointer',
-                                whiteSpace: 'nowrap'
-                              }}
-                            >
-                              <span>✋ Drop Note</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+              {/* 🔴 2 Negatives / Friction Points */}
+              <div>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: '#f87171',
+                  textTransform: 'uppercase',
+                  marginBottom: '6px',
+                  letterSpacing: '0.03em'
+                }}>
+                  <AlertCircle size={13} color="#f87171" />
+                  <span>2 Areas to Improve (Needs Attention)</span>
                 </div>
-              )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {negatives.map((text, idx) => (
+                    <div
+                      key={`neg_${idx}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '8px',
+                        backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                        border: '1px solid rgba(239, 68, 68, 0.28)',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        fontSize: '12px',
+                        color: '#fef2f2',
+                        lineHeight: 1.4
+                      }}
+                    >
+                      <span style={{ color: '#ef4444', fontSize: '12px', fontWeight: 700, flexShrink: 0 }}>!</span>
+                      <span style={{ flex: 1 }}>{text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
+
           </div>
 
           {/* Footer */}
