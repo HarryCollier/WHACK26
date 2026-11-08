@@ -123,8 +123,6 @@ describe('AI Coach & Engagement Components', () => {
         comprehension_rating: "High",
         comprehension_score: 88,
         pacing: {
-          tutor_talk_pct: 60,
-          student_talk_pct: 40,
           status: "Balanced",
           advice: "Good pacing and wait time."
         },
@@ -140,7 +138,6 @@ describe('AI Coach & Engagement Components', () => {
     await waitFor(() => {
       expect(screen.getByText(/Balanced lesson flow/i)).toBeInTheDocument();
       expect(screen.getByText(/88\/100/i)).toBeInTheDocument();
-      expect(screen.getByText(/Talk-Time Split/i)).toBeInTheDocument();
     });
   });
 });

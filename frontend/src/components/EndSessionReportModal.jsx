@@ -91,7 +91,6 @@ export default function EndSessionReportModal({
       report?.summary || 'Session dynamic balanced.',
       '',
       `Comprehension Score: ${report?.comprehension_score ?? 75}/100 (${report?.comprehension_label || 'High'})`,
-      `Talk-Time Split: Tutor ${report?.turn_taking?.tutor_talk_pct ?? 50}% / Student ${report?.turn_taking?.student_talk_pct ?? 50}%`,
       `Pacing: ${report?.pacing_feedback || 'Well-balanced conversation.'}`,
       '',
       '## FULL CONVERSATION TRANSCRIPT',
@@ -327,44 +326,6 @@ export default function EndSessionReportModal({
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#64748b', marginTop: '6px' }}>
                       <span>Attentive Focus</span>
                       <span style={{ fontWeight: 600, color: '#f8fafc' }}>{report?.comprehension_score ?? 75}/100</span>
-                    </div>
-                  </div>
-
-                  {/* Talk-Time Split Card */}
-                  <div style={{
-                    backgroundColor: '#0f172a',
-                    padding: '16px',
-                    borderRadius: '12px',
-                    border: '1px solid #334155'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                      <span style={{ fontSize: '12px', fontWeight: 600, color: '#94a3b8' }}>Talk-Time Split</span>
-                      <span style={{
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        padding: '2px 8px',
-                        borderRadius: '10px',
-                        backgroundColor: '#1e3a8a',
-                        color: '#93c5fd'
-                      }}>
-                        {report?.turn_taking?.assessment || 'Balanced'}
-                      </span>
-                    </div>
-                    <div style={{ width: '100%', height: '8px', backgroundColor: '#334155', borderRadius: '4px', overflow: 'hidden', display: 'flex' }}>
-                      <div style={{
-                        width: `${report?.turn_taking?.tutor_talk_pct ?? 50}%`,
-                        height: '100%',
-                        backgroundColor: '#38bdf8'
-                      }} />
-                      <div style={{
-                        width: `${report?.turn_taking?.student_talk_pct ?? 50}%`,
-                        height: '100%',
-                        backgroundColor: '#4ade80'
-                      }} />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
-                      <span>Tutor {report?.turn_taking?.tutor_talk_pct ?? 50}%</span>
-                      <span>Student {report?.turn_taking?.student_talk_pct ?? 50}%</span>
                     </div>
                   </div>
                 </div>

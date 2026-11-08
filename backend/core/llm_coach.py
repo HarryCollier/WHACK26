@@ -505,13 +505,13 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
 
     if tutor_pct > 75:
         pacing_status = "Tutor-Heavy"
-        pacing_advice = f"Tutor is doing {tutor_pct}% of the talking. Pause for 3–5 seconds after asking questions to allow the student time to respond."
+        pacing_advice = "Pause for 3–5 seconds after asking questions to allow the student time to respond."
     elif student_pct > 65:
         pacing_status = "Student-Led"
         pacing_advice = "Great student engagement and active participation. Provide structured scaffolding when needed."
     else:
         pacing_status = "Balanced"
-        pacing_advice = f"Well-balanced turn taking ({tutor_pct}% tutor / {student_pct}% student)."
+        pacing_advice = "Well-balanced conversational pacing and wait time."
 
     # 2. Visual Confusion & Attention
     student_eng_avg = student_video.get("engagement_avg") or 0.75
@@ -625,7 +625,7 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
         comprehension_score = max(30, int(student_eng_avg * 100))
 
     summary = (
-        f"The session dynamic is currently {pacing_status.lower()} with {tutor_pct}% tutor talk time. "
+        f"The session dynamic is currently {pacing_status.lower()}. "
         f"Student attention indicates {comprehension_rating.lower()} comprehension ({comprehension_score}% score). "
         f"{wb_feedback}"
     )
@@ -643,9 +643,9 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
 
     # Positives evaluation
     if pacing_status == "Balanced":
-        positives.append(f"Balanced conversational pacing ({tutor_pct}% tutor / {student_pct}% student), leaving healthy space for student responses.")
+        positives.append("Balanced conversational pacing, leaving healthy space for student responses.")
     elif student_pct >= 40:
-        positives.append(f"Strong student verbal participation ({student_pct}% of total talk-time).")
+        positives.append("Strong student verbal participation and active engagement.")
     else:
         positives.append("Tutor provides structured, clear explanations of core concepts.")
 
@@ -665,7 +665,7 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
 
     # Negatives / Friction Points evaluation
     if tutor_pct > 70:
-        negatives.append(f"Pacing is tutor-heavy ({tutor_pct}% talk-time). Extend wait time to 4–5 seconds after asking questions.")
+        negatives.append("Extend wait time to 4–5 seconds after asking questions to give the student space to think.")
     elif student_pct > 75:
         negatives.append("Student is leading without much scaffolding; step in with structured checks to anchor accuracy.")
 
@@ -1821,7 +1821,6 @@ def _generate_heuristic_inquiry_answer(
     elif any(k in q_lower for k in ["pace", "pacing", "talk", "wait", "time", "ratio", "split"]):
         return (
             "### How your conversational pacing looked:\n\n"
-            f"Overall, you carried about **{tutor_pct}% of the talking time**, with your student speaking for **{student_pct}%** across {len(dialogue)} speech turns.\n\n"
             "- **Student Demeanor**: When watching the student, they seemed attentive and engaged throughout, but hesitated noticeably after you asked multi-step questions.\n"
             "- **Wait-Time Tip**: Try counting to 3 or 4 in your head after asking a question before jumping in with a hint. Giving that extra few seconds of silence allows the student to process the numbers and often prompts them to explain their thinking voluntarily!"
         )
@@ -1840,8 +1839,7 @@ def _generate_heuristic_inquiry_answer(
             f"### Session Impressions & Next Steps for Room {telemetry.get('session_meta', {}).get('room_code', 'Active')}:\n\n"
             "Overall, this was a productive and collaborative session! Here are the main highlights from the student's behavior and learning flow:\n\n"
             f"- **Engagement & Attitude**: Your student stayed focused on the screen and actively contributed {student_edits} times on the whiteboard in green.\n"
-            "- **Moments of Hesitation**: They looked deep in thought and a bit puzzled during multi-digit subtraction, but remained willing to try.\n"
-            f"- **Dialogue Split**: You did about {tutor_pct}% of the talking. Pacing was steady, with good opportunities to let the student explain more.\n\n"
+            "- **Moments of Hesitation**: They looked deep in thought and a bit puzzled during multi-digit subtraction, but remained willing to try.\n\n"
             "**My Top Recommendation for Next Time**:\n"
             "Celebrate their willingness to write on the board, and use quick visual sketches (like tens-and-units columns) whenever you tackle subtraction."
         )

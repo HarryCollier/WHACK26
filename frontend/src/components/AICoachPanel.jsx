@@ -30,8 +30,7 @@ export const LiveEngagementBadge = ({ roomCode, socket, role, onClick }) => {
     student_face_detected: false,
     brow_furrow_level: 0.0,
     gaze_direction: 'unknown',
-    actionable_hint: 'Check if student camera is on.',
-    pacing: { tutor_talk_pct: 50, student_talk_pct: 50 }
+    actionable_hint: 'Check if student camera is on.'
   });
 
   // Listen for WebSocket pulses and poll every 15s as fallback
@@ -458,63 +457,37 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
               </p>
             </div>
 
-            {/* Comprehension & Pacing Gauges */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              {/* Comprehension Gauge */}
-              <div style={{
-                backgroundColor: '#1e293b',
-                borderRadius: '10px',
-                padding: '12px 14px',
-                border: '1px solid #334155'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <span style={{ fontSize: '11px', fontWeight: 600, color: '#94a3b8' }}>Comprehension</span>
-                  <span style={{
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    padding: '2px 6px',
-                    borderRadius: '4px',
-                    backgroundColor: report.comprehension_rating === 'High' ? '#064e3b' : report.comprehension_rating === 'Moderate' ? '#451a03' : '#450a0a',
-                    color: report.comprehension_rating === 'High' ? '#6ee7b7' : report.comprehension_rating === 'Moderate' ? '#fde68a' : '#fca5a5'
-                  }}>
-                    {report.comprehension_rating}
-                  </span>
-                </div>
-                <div style={{ height: '8px', backgroundColor: '#334155', borderRadius: '4px', overflow: 'hidden' }}>
-                  <div style={{
-                    width: `${report.comprehension_score || 70}%`,
-                    height: '100%',
-                    backgroundColor: report.comprehension_rating === 'High' ? '#10b981' : report.comprehension_rating === 'Moderate' ? '#f59e0b' : '#ef4444',
-                    borderRadius: '4px',
-                    transition: 'width 0.5s ease'
-                  }} />
-                </div>
-                <div style={{ textAlign: 'right', fontSize: '11px', color: '#64748b', marginTop: '4px', fontFamily: 'monospace' }}>
-                  {report.comprehension_score || 70}/100
-                </div>
+            {/* Comprehension Gauge */}
+            <div style={{
+              backgroundColor: '#1e293b',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              border: '1px solid #334155'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 600, color: '#94a3b8' }}>Comprehension</span>
+                <span style={{
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  backgroundColor: report.comprehension_rating === 'High' ? '#064e3b' : report.comprehension_rating === 'Moderate' ? '#451a03' : '#450a0a',
+                  color: report.comprehension_rating === 'High' ? '#6ee7b7' : report.comprehension_rating === 'Moderate' ? '#fde68a' : '#fca5a5'
+                }}>
+                  {report.comprehension_rating}
+                </span>
               </div>
-
-              {/* Dialogue Split Gauge */}
-              <div style={{
-                backgroundColor: '#1e293b',
-                borderRadius: '10px',
-                padding: '12px 14px',
-                border: '1px solid #334155'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <span style={{ fontSize: '11px', fontWeight: 600, color: '#94a3b8' }}>Talk-Time Split</span>
-                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#38bdf8' }}>
-                    {report.pacing?.status || 'Balanced'}
-                  </span>
-                </div>
-                <div style={{ height: '8px', display: 'flex', borderRadius: '4px', overflow: 'hidden' }}>
-                  <div style={{ width: `${report.pacing?.tutor_talk_pct || 50}%`, backgroundColor: '#3b82f6' }} title={`Tutor: ${report.pacing?.tutor_talk_pct || 50}%`} />
-                  <div style={{ width: `${report.pacing?.student_talk_pct || 50}%`, backgroundColor: '#10b981' }} title={`Student: ${report.pacing?.student_talk_pct || 50}%`} />
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#64748b', marginTop: '4px' }}>
-                  <span>Tutor {report.pacing?.tutor_talk_pct || 50}%</span>
-                  <span>Student {report.pacing?.student_talk_pct || 50}%</span>
-                </div>
+              <div style={{ height: '8px', backgroundColor: '#334155', borderRadius: '4px', overflow: 'hidden' }}>
+                <div style={{
+                  width: `${report.comprehension_score || 70}%`,
+                  height: '100%',
+                  backgroundColor: report.comprehension_rating === 'High' ? '#10b981' : report.comprehension_rating === 'Moderate' ? '#f59e0b' : '#ef4444',
+                  borderRadius: '4px',
+                  transition: 'width 0.5s ease'
+                }} />
+              </div>
+              <div style={{ textAlign: 'right', fontSize: '11px', color: '#64748b', marginTop: '4px', fontFamily: 'monospace' }}>
+                {report.comprehension_score || 70}/100
               </div>
             </div>
 

@@ -131,8 +131,7 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
     student_face_detected: false,
     brow_furrow_level: 0.0,
     gaze_direction: 'unknown',
-    actionable_hint: 'Waiting for student camera feed.',
-    pacing: { tutor_talk_pct: 50, student_talk_pct: 50 }
+    actionable_hint: 'Waiting for student camera feed.'
   });
 
   const [isHovered, setIsHovered] = useState(false);
