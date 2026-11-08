@@ -12,12 +12,13 @@ Uses Python's standard library (urllib.request) for zero extra dependencies.
 """
 
 import os
+import re
 import json
 import time
 import logging
 import urllib.request
 import urllib.error
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,75 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
-COACH_SYSTEM_PROMPT = """You are an expert pedagogical tutoring coach analyzing a live tutoring session.
+
+def _clean_math_formatting(text: str) -> str:
+    r"""
+    Cleans LaTeX math syntax ($$...$$, $...$, \(...\), \[...\], \frac, \times)
+    into clean, natural human-readable text.
+    """
+    if not text:
+        return text
+
+    # Standard LaTeX operator replacements
+    text = re.sub(r'\\times\b', '×', text)
+    text = re.sub(r'\\div\b', '÷', text)
+    text = re.sub(r'\\cdot\b', '·', text)
+    text = re.sub(r'\\le(q)?\b', '≤', text)
+    text = re.sub(r'\\ge(q)?\b', '≥', text)
+    text = re.sub(r'\\ne(q)?\b', '≠', text)
+    text = re.sub(r'\\pm\b', '±', text)
+
+    # Fractions: \frac{a}{b} -> a/b
+    text = re.sub(r'\\frac\{([^{}]+)\}\{([^{}]+)\}', r'\1/\2', text)
+
+    # Display math: $$...$$ -> ...
+    text = re.sub(r'\$\$([^\$]+)\$\$', r'\1', text)
+    text = re.sub(r'\\\[([^\]]+)\\\]', r'\1', text)
+    text = re.sub(r'\\\(([^\)]+)\\\)', r'\1', text)
+
+    # Inline math: $...$ -> ...
+    def unwrap_math(m):
+        inner = m.group(1).strip()
+        # Retain pure currency amounts like $50 or $100.50
+        if re.match(r'^\d+([.,]\d+)?$', inner):
+            return m.group(0)
+        return inner
+
+    text = re.sub(r'(?<![\$\w])\$([^\$\n]+?)\$(?![\$\w])', unwrap_math, text)
+    return text
+
+
+def _clean_report_math(obj: Any) -> Any:
+    """Recursively cleans LaTeX math formatting from all string values in a data structure."""
+    if isinstance(obj, str):
+        return _clean_math_formatting(obj)
+    elif isinstance(obj, dict):
+        return {k: _clean_report_math(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_clean_report_math(item) for item in obj]
+    return obj
+
+
+COACH_SYSTEM_PROMPT = r"""You are an experienced, compassionate, and expert pedagogical tutoring coach analyzing a live tutoring session.
 You are given a multimodal session snapshot containing:
 1. Transcript dialogue with timestamps for Tutor and Student.
 2. Acoustic signals (speech energy, pitch, hesitation, pause count).
-3. Student facial engagement and attention states (gaze direction, brow furrow confusion spikes, head pose).
+3. Student visual demeanor (moments of focus, hesitations, or looking puzzled/thoughtful).
 4. Whiteboard activity, delta changes, and element logs.
 5. (Multimodal) The current whiteboard image snapshot showing handwritten work, formulas, and diagrams created by the tutor and student.
+
+HUMAN-CENTERED TONE & OBSERVATION RULES (CRITICAL):
+- Speak like a supportive senior mentor advising a fellow teacher — warm, personable, and observant.
+- NEVER use clinical or robotic jargon like "brow furrow score", "eyebrow flutters", "gaze vector", "facial engagement index", or "cognitive load metric".
+- Always describe student behaviors in normal, natural human terms:
+  * "The student looked puzzled during the multi-digit problem"
+  * "The student hesitated before writing their answer, seeming deep in thought"
+  * "The student leaned in attentively and stayed focused on the board"
+  * "The student paused thoughtfully to process the explanation"
+
+NO LATEX / PLAIN HUMAN MATHEMATICAL NOTATION (MANDATORY):
+- NEVER wrap mathematical statements or numbers in LaTeX notation such as $$...$$, $...$, \[...\], or \(...\).
+- Write all numbers, equations, and mathematical steps in plain, everyday human notation as someone would read and write them on a board (e.g. "21 - 1 = 20", "3 + 7 = 10", "1/2", "3 x 4 = 12").
 
 WHITEBOARD VISUAL COLOR CODING & ATTRIBUTION RULES:
 - The whiteboard image has an explicit visual legend at the top:
@@ -51,7 +114,7 @@ WHITEBOARD VISUAL COLOR CODING & ATTRIBUTION RULES:
 
 You MUST respond ONLY with a valid JSON object matching this exact schema:
 {
-  "summary": "2-3 sentences summarizing current dynamic, learning flow, and whiteboard work",
+  "summary": "2-3 sentences summarizing current dynamic, learning flow, and whiteboard work in a supportive, human tone",
   "comprehension_rating": "High" | "Moderate" | "Needs Attention",
   "comprehension_score": 0 to 100,
   "pacing": {
@@ -72,7 +135,7 @@ You MUST respond ONLY with a valid JSON object matching this exact schema:
   "friction_points": [
     {
       "time_label": "MM:SS",
-      "observation": "brief description of confusion/hesitation moment",
+      "observation": "natural human description of hesitation/confusion (e.g. 'Student looked momentarily puzzled during explanation of step 2')",
       "recommendation": "specific pedagogical question or check for the tutor"
     }
   ],
@@ -160,6 +223,7 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
         heuristic = _generate_heuristic_report(telemetry_payload)
         report["whiteboard_relevance"] = heuristic.get("whiteboard_relevance", {})
 
+    report = _clean_report_math(report)
     report["provider_used"] = provider_used
     report["generated_at_ms"] = int(time.time() * 1000)
     return report
@@ -168,7 +232,7 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
 def _call_gemini(prompt_context: str, api_key: str, image_data_url: Optional[str] = None) -> Dict[str, Any]:
     configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     candidate_models = [configured_model]
-    for fallback in ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]:
+    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
@@ -377,14 +441,14 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
 
     friction_points = []
 
-    # Check for brow furrow / confusion spikes in trend
+    # Check for confusion / hesitation spikes in trend
     trend = student_video.get("engagement_trend", [])
     for idx, pt in enumerate(trend):
         if pt.get("brow_furrow", 0) > 0.40 or pt.get("attention_state") == "confused_furrow":
             time_lbl = f"Point #{idx+1}"
             friction_points.append({
                 "time_label": time_lbl,
-                "observation": f"Elevated brow furrow ({round(pt.get('brow_furrow', 0)*100)}%) detected during explanation.",
+                "observation": "Student seemed momentarily puzzled or hesitant during the explanation.",
                 "recommendation": "Ask the student: 'Does that step make sense, or would you like to see another example?'"
             })
             if len(friction_points) >= 2:
@@ -397,7 +461,7 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
     if (screen_gazes / total_gazes) < 0.50 and total_gazes > 5:
         friction_points.append({
             "time_label": "Recent",
-            "observation": "Student frequently looking away from screen (over 50% of recent time).",
+            "observation": "Student seemed distracted and was looking away from the lesson.",
             "recommendation": "Re-engage student with an interactive check-in or request them to write on the whiteboard."
         })
 
@@ -563,3 +627,883 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
             }
 
     return None
+
+
+# ==============================================================================
+# Tutor Post-Session AI Coach Inquiry / Q&A Service
+# ==============================================================================
+
+INQUIRY_SYSTEM_PROMPT = r"""You are an experienced, warm, and highly skilled pedagogical mentor and tutoring coach chatting with a teacher.
+The teacher has concluded (or is reviewing) their tutoring session and is asking you questions about their lesson, student understanding, misconceptions, pacing, or recommendations for follow-up sessions.
+
+You have access to the complete multimodal session data:
+1. Complete dialogue transcript between Tutor and Student with timestamps.
+2. Whiteboard work and snapshot image:
+   - VISUAL ATTRIBUTION & COLOR CODING:
+     * BLACK/DARK SLATE strokes: Written by TUTOR (questions, equation stems, prompts, instructions).
+     * GREEN strokes: Written by PUPIL / STUDENT (answers, calculation steps, drawings).
+   - Topic Relevance & Comprehension:
+     * Attribute the question stem (e.g. '21 - 1 =') to the tutor and the answer (e.g. '16') to the pupil.
+     * Calculation errors (e.g. pupil writing '16' for '21 - 1 =' or '14' for '12 - 2 =') are arithmetic/misconception errors, NOT off-topic work! Diagnose their mathematical reasoning (e.g., place value confusion, subtracting backwards).
+3. Conversational dynamics: Speech flow, wait time, pause count, talk-time ratio between tutor and student.
+4. Student visual demeanor: Moments where the student seemed puzzled, hesitations, focused attention, or looking thoughtful.
+
+COMMUNICATION STYLE & TONE (CRITICAL):
+- Sound like a REAL, SUPPORTIVE HUMAN MENTOR — conversational, empathetic, personable, and encouraging.
+- NEVER use clinical or robotic jargon!
+  * DO NOT SAY: "pupil's eyebrow flutters", "brow furrow score 0.42", "facial engagement vector", "acoustic signal variance", or "elevated cognitive load metric".
+  * INSTEAD, TALK LIKE A REAL TEACHER:
+    - "Your student seemed a bit puzzled when looking at the problem..."
+    - "They paused and looked deep in thought before writing their answer..."
+    - "You could tell they hesitated slightly around the 2-minute mark..."
+    - "They seemed really engaged and focused on the board work..."
+- Greet the tutor warmly or respond conversationally rather than spitting out a sterile spreadsheet or robotic audit.
+- Provide practical, down-to-earth teaching tips (e.g., "Next time, try using base-10 blocks or a quick number line on the board").
+- Format your response with clear, easy-to-read Markdown (bullet points, bold highlights, short friendly paragraphs).
+
+NO LATEX / PLAIN HUMAN MATHEMATICAL NOTATION (MANDATORY):
+- NEVER wrap mathematical statements or numbers in LaTeX notation like $$...$$, $...$, \[...\], or \(...\).
+- Write all mathematical expressions as a human would naturally write or read them in plain text:
+  * Good: "21 - 1 = 20", "3 + 7 = 10", "1/2", "3 x 4 = 12", "10 ÷ 2 = 5"
+  * BAD: "$$21 - 1 = 20$$", "$3 + 7 = 10$", "$\frac{1}{2}$"
+"""
+
+
+def answer_tutor_inquiry(
+    telemetry_payload: Dict[str, Any],
+    user_prompt: str,
+    chat_history: Optional[list] = None,
+    api_key: Optional[str] = None,
+    provider_override: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Answers a teacher's post-session (or mid-session) inquiry grounded in multimodal telemetry.
+    Supports conversational history and returns formatted pedagogical feedback.
+    """
+    _load_env_file()
+    provider = provider_override or os.environ.get("LLM_PROVIDER", "auto").lower()
+    gemini_key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+
+    if provider == "auto":
+        if gemini_key:
+            provider = "gemini"
+        elif openai_key:
+            provider = "openai"
+        elif os.environ.get("OLLAMA_ENABLED", "").lower() in ("true", "1"):
+            provider = "ollama"
+        else:
+            provider = "heuristic"
+
+    logger.info(f"Answering tutor inquiry using provider: {provider}")
+
+    prompt_context = telemetry_payload.get("llm_prompt_context", "")
+    wb_telemetry = telemetry_payload.get("whiteboard_telemetry", {})
+    image_data_url = wb_telemetry.get("current_data_url")
+
+    response_text = None
+    provider_used = provider
+
+    try:
+        if provider == "gemini" and gemini_key:
+            response_text = _call_gemini_inquiry(
+                prompt_context=prompt_context,
+                user_prompt=user_prompt,
+                chat_history=chat_history,
+                api_key=gemini_key,
+                image_data_url=image_data_url
+            )
+        elif provider == "openai" and openai_key:
+            response_text = _call_openai_inquiry(
+                prompt_context=prompt_context,
+                user_prompt=user_prompt,
+                chat_history=chat_history,
+                api_key=openai_key,
+                image_data_url=image_data_url
+            )
+        elif provider == "ollama":
+            response_text = _call_ollama_inquiry(
+                prompt_context=prompt_context,
+                user_prompt=user_prompt,
+                chat_history=chat_history
+            )
+    except Exception as e:
+        logger.warning(f"LLM inquiry provider '{provider}' failed ({e}). Falling back to Heuristic Engine.")
+        provider_used = f"heuristic (fallback from {provider})"
+
+    if not response_text:
+        response_text = _generate_heuristic_inquiry_answer(telemetry_payload, user_prompt, chat_history)
+        if provider_used == provider and provider != "heuristic":
+            provider_used = "heuristic"
+
+    response_text = _clean_math_formatting(response_text)
+
+    return {
+        "response": response_text,
+        "provider_used": provider_used,
+        "timestamp_ms": int(time.time() * 1000)
+    }
+
+
+def _call_gemini_inquiry(
+    prompt_context: str,
+    user_prompt: str,
+    chat_history: Optional[list],
+    api_key: str,
+    image_data_url: Optional[str] = None
+) -> str:
+    configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+    candidate_models = [configured_model]
+    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    system_and_context = (
+        f"{INQUIRY_SYSTEM_PROMPT}\n\n"
+        f"=== SESSION TELEMETRY & MEETING DATA ===\n"
+        f"{prompt_context}\n\n"
+    )
+
+    initial_parts: list = [{"text": system_and_context}]
+
+    if image_data_url:
+        try:
+            if "," in image_data_url:
+                mime_part, b64_data = image_data_url.split(",", 1)
+                mime_type = "image/jpeg"
+                if "png" in mime_part:
+                    mime_type = "image/png"
+            else:
+                b64_data = image_data_url
+                mime_type = "image/jpeg"
+
+            initial_parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": b64_data
+                }
+            })
+            initial_parts.append({
+                "text": "Above is the latest rendered whiteboard image snapshot.\n"
+                        "COLOR CODING LEGEND: Black/Slate strokes = Tutor questions/equation stems. Green strokes = Pupil answers/work."
+            })
+        except Exception as img_err:
+            logger.warning(f"Failed to prepare whiteboard image for Gemini inquiry: {img_err}")
+
+    contents = []
+    if chat_history and len(chat_history) > 0:
+        first_q = chat_history[0].get("content", "")
+        initial_parts.append({"text": f"Tutor question: {first_q}"})
+        contents.append({"role": "user", "parts": initial_parts})
+        for turn in chat_history[1:]:
+            role = "user" if turn.get("role") == "user" else "model"
+            contents.append({
+                "role": role,
+                "parts": [{"text": turn.get("content", "")}]
+            })
+        contents.append({
+            "role": "user",
+            "parts": [{"text": user_prompt}]
+        })
+    else:
+        initial_parts.append({"text": f"Tutor's Question:\n{user_prompt}"})
+        contents.append({"role": "user", "parts": initial_parts})
+
+    last_err = None
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+        req_data = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.4,
+                "maxOutputTokens": 1200
+            }
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(req_data).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=16) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                candidates = result.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    res_parts = candidates[0]["content"].get("parts", [])
+                    if res_parts and "text" in res_parts[0]:
+                        return res_parts[0]["text"]
+        except urllib.error.HTTPError as err:
+            last_err = err
+            logger.warning(f"Gemini model '{model}' failed for inquiry with status {err.code}. Trying next candidate...")
+            continue
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Gemini model '{model}' inquiry error: {e}. Trying next candidate...")
+            continue
+
+    if last_err:
+        raise last_err
+    raise ValueError("Empty or invalid response from Gemini API for inquiry")
+
+
+def _call_openai_inquiry(
+    prompt_context: str,
+    user_prompt: str,
+    chat_history: Optional[list],
+    api_key: str,
+    image_data_url: Optional[str] = None
+) -> str:
+    model = os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    url = "https://api.openai.com/v1/chat/completions"
+
+    system_msg = {"role": "system", "content": INQUIRY_SYSTEM_PROMPT}
+    user_content: list = [
+        {"type": "text", "text": f"=== SESSION TELEMETRY & MEETING DATA ===\n{prompt_context}\n"}
+    ]
+    if image_data_url:
+        img_url = image_data_url if image_data_url.startswith("data:") else f"data:image/jpeg;base64,{image_data_url}"
+        user_content.append({"type": "image_url", "image_url": {"url": img_url, "detail": "low"}})
+        user_content.append({"type": "text", "text": "Note: Black strokes = Tutor questions/prompts. Green strokes = Pupil answers/work."})
+
+    messages = [system_msg]
+    if chat_history and len(chat_history) > 0:
+        user_content.append({"type": "text", "text": f"Tutor Question: {chat_history[0].get('content', '')}"})
+        messages.append({"role": "user", "content": user_content})
+        for turn in chat_history[1:]:
+            role = "user" if turn.get("role") == "user" else "assistant"
+            messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append({"role": "user", "content": user_prompt})
+    else:
+        user_content.append({"type": "text", "text": f"Tutor's Question:\n{user_prompt}"})
+        messages.append({"role": "user", "content": user_content})
+
+    req_data = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": 1200
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(req_data).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        },
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=14) as response:
+        result = json.loads(response.read().decode("utf-8"))
+        choices = result.get("choices", [])
+        if choices and "message" in choices[0]:
+            return choices[0]["message"].get("content", "")
+
+    raise ValueError("Empty or invalid response from OpenAI API for inquiry")
+
+
+def _call_ollama_inquiry(
+    prompt_context: str,
+    user_prompt: str,
+    chat_history: Optional[list]
+) -> str:
+    base_url = os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL)
+    model = os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+
+    messages = [{"role": "system", "content": INQUIRY_SYSTEM_PROMPT}]
+    first_text = f"=== SESSION TELEMETRY & MEETING DATA ===\n{prompt_context}\n"
+    if chat_history and len(chat_history) > 0:
+        messages.append({"role": "user", "content": f"{first_text}\nTutor Question: {chat_history[0].get('content', '')}"})
+        for turn in chat_history[1:]:
+            role = "user" if turn.get("role") == "user" else "assistant"
+            messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append({"role": "user", "content": user_prompt})
+    else:
+        messages.append({"role": "user", "content": f"{first_text}\nTutor's Question:\n{user_prompt}"})
+
+    req_data = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(req_data).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=24) as response:
+        result = json.loads(response.read().decode("utf-8"))
+        choices = result.get("choices", [])
+        if choices and "message" in choices[0]:
+            return choices[0]["message"].get("content", "")
+
+    raise ValueError("Empty or invalid response from Ollama API for inquiry")
+
+
+def _generate_heuristic_inquiry_answer(
+    telemetry: Dict[str, Any],
+    user_prompt: str,
+    chat_history: Optional[list] = None
+) -> str:
+    dialogue = telemetry.get("dialogue_timeline", [])
+    video = telemetry.get("video_telemetry", {})
+    whiteboard = telemetry.get("whiteboard_telemetry", {})
+    student_video = video.get("student", {})
+
+    tutor_words = sum(len(d.get("speech", "").split()) for d in dialogue if d.get("role") == "tutor")
+    student_words = sum(len(d.get("speech", "").split()) for d in dialogue if d.get("role") == "student")
+    total_words = tutor_words + student_words
+    tutor_pct = round(100 * tutor_words / total_words) if total_words > 0 else 50
+    student_pct = 100 - tutor_pct
+
+    student_edits = whiteboard.get("student_edits", 0)
+    brow_furrow = student_video.get("brow_furrow_avg") or 0.0
+    engagement_avg = student_video.get("engagement_avg")
+
+    q_lower = user_prompt.lower()
+
+    if any(k in q_lower for k in ["misconception", "struggle", "math", "subtraction", "error", "mistake", "answer", "wrote", "write", "16", "21", "equation", "place value", "confus"]):
+        return (
+            "### Here's what was happening with your student's math work:\n\n"
+            "Great question! Looking closely at the session dynamic and the whiteboard:\n\n"
+            "1. **Active Board Collaboration**:\n"
+            "   - You set up the equation stems in **black**, and your student jumped right in, writing their answers in **green**.\n"
+            "   - They were eager to participate and tried working through the calculations directly on the board rather than holding back.\n\n"
+            "2. **The Misconception (Place Values)**:\n"
+            "   - When answering problems like `21 - 1 = 16` or `12 - 2 = 14`, the student isn't off-topic at all — they're experiencing a very common **place value confusion**.\n"
+            "   - In `21 - 1`, it looks like they subtracted 1 from the tens place (`2 - 1 = 1`) and wrote down `16` after getting tangled between tens and units.\n\n"
+            "3. **What You Can Try Next Lesson**:\n"
+            "   - **Draw a quick visual**: Use a quick number line or sketch tens rods and unit cubes right on the whiteboard.\n"
+            "   - **Ask them to 'think out loud'**: Have them talk you through their steps before writing down the final answer.\n"
+            "   - **Anchor decade transitions**: Start with `20 - 1 = ?` to help them see how decade boundaries work."
+        )
+    elif any(k in q_lower for k in ["pace", "pacing", "talk", "wait", "time", "ratio", "split"]):
+        return (
+            "### How your conversational pacing looked:\n\n"
+            f"Overall, you carried about **{tutor_pct}% of the talking time**, with your student speaking for **{student_pct}%** across {len(dialogue)} speech turns.\n\n"
+            "- **Student Demeanor**: When watching the student, they seemed attentive and engaged throughout, but hesitated noticeably after you asked multi-step questions.\n"
+            "- **Wait-Time Tip**: Try counting to 3 or 4 in your head after asking a question before jumping in with a hint. Giving that extra few seconds of silence allows the student to process the numbers and often prompts them to explain their thinking voluntarily!"
+        )
+    elif any(k in q_lower for k in ["practice", "problem", "next", "follow up", "exercise", "homework"]):
+        return (
+            "### 3 Targeted Practice Problems for Your Next Lesson:\n\n"
+            "To help your student master place values and build confidence in subtraction, here are three progressive problems to try:\n\n"
+            "1. **Decade Anchor (Warmup)**: `20 - 1 = ?` and `10 - 1 = ?`\n"
+            "   * *Why*: Reinforces what happens to the tens place when subtracting 1.\n"
+            "2. **Single-Unit Subtraction**: `21 - 1 = ?` with Base-10 Drawings\n"
+            "   * *Why*: Have the student cross out the single unit cube on the whiteboard to visually see the 2 tens (20) remaining.\n"
+            "3. **Role Reversal (Student as Teacher)**: Let the student write a subtraction problem on the board for *you* to solve!"
+        )
+    else:
+        return (
+            f"### Session Impressions & Next Steps for Room {telemetry.get('session_meta', {}).get('room_code', 'Active')}:\n\n"
+            "Overall, this was a productive and collaborative session! Here are the main highlights from the student's behavior and learning flow:\n\n"
+            f"- **Engagement & Attitude**: Your student stayed focused on the screen and actively contributed {student_edits} times on the whiteboard in green.\n"
+            "- **Moments of Hesitation**: They looked deep in thought and a bit puzzled during multi-digit subtraction, but remained willing to try.\n"
+            f"- **Dialogue Split**: You did about {tutor_pct}% of the talking. Pacing was steady, with good opportunities to let the student explain more.\n\n"
+            "**My Top Recommendation for Next Time**:\n"
+            "Celebrate their willingness to write on the board, and use quick visual sketches (like tens-and-units columns) whenever you tackle subtraction."
+        )
+
+
+WHITEBOARD_GEN_SYSTEM_PROMPT = r"""You are an expert AI whiteboard instructional designer and diagram generator for live tutoring sessions.
+Your task is to generate clean, beautifully formatted educational exercises, math questions, scaffolds, and visual diagrams to be rendered directly onto the interactive whiteboard.
+
+MANDATORY PEDAGOGICAL GROUNDING:
+- Inspect the provided live session telemetry: transcripts, speech turns, and especially ACTIVE WHITEBOARD ELEMENTS currently on the board.
+- Tailor the new content directly to the tutor's prompt AND the existing question style, difficulty level, and themes observed in the session.
+- If previous math problems were horizontal equations (e.g. '21 - 1 = ...'), match or naturally progress that format.
+- If the student was hesitant or made a mistake on place value / regrouping, provide targeted practice problems with step-by-step scaffolds or answer boxes.
+
+COORDINATE & GRAPH PLOTTING (CRITICAL):
+- If the tutor asks to plot a graph, function, or calculus diagram (e.g., 'integrating 1/x', 'plot f(x)', 'graph of curve', 'coordinate axes'):
+  - MUST draw the coordinate plane: X-axis with an arrow pointing right, Y-axis with an arrow pointing up, origin label 'O' or (0,0), and tick marks.
+  - MUST draw the function curve or line using connected 'line' elements approximating the shape of the function. For 1/x, plot points along the hyperbola in the first quadrant from x=0.6 down to x=4.5.
+  - MUST draw integration bounds / shaded vertical interval if integration is mentioned (e.g. vertical lines at x=1 and x=3).
+  - Include formula text (e.g. 'y = 1/x', 'Integral of 1/x dx = ln|x| + C') and clear labels on axes ('x', 'y').
+
+MANDATORY RULES:
+1. NO LATEX (CRITICAL): Never use $$...$$, $...$, \[...\], \(...\), \frac, or \times. Use plain everyday human math notation: "25 - 9 = [   ]", "1/2", "4 x 6 = 24", "Integral of (1/x) dx = ln|x| + C".
+2. OUTPUT STRICT JSON ONLY with the following schema:
+{
+  "title": "Title (e.g. Graph of 1/x and Integration)",
+  "summary": "1 sentence describing what was generated and how it links to previous work",
+  "width": 540,
+  "height": 360,
+  "elements": [
+    {
+      "type": "shape",
+      "shapeType": "rectangle" | "circle" | "triangle" | "line" | "arrow",
+      "start": { "x": number, "y": number },
+      "end": { "x": number, "y": number },
+      "color": "#hex",
+      "size": number,
+      "fillColor": "#hex" (optional)
+    },
+    {
+      "type": "text",
+      "text": "plain text string",
+      "x": number,
+      "y": number,
+      "color": "#hex",
+      "fontSize": 14 | 16 | 18 | 20,
+      "fontWeight": "normal" | "600" | "bold"
+    }
+  ]
+}
+
+COORDINATE & LAYOUT SYSTEM:
+- Bounding box is typically width ~520-560, height ~320-380 starting at (0, 0).
+- Card container: A surrounding rectangle with start {x: 0, y: 0}, end {x: width, y: height}, color "#cbd5e1", size 2, and optional soft fillColor "#ffffff".
+- Title banner text at x: 24, y: 40 with fontSize 18, color "#1e3a8a".
+- Header dividing line from {x: 20, y: 52} to {x: width - 20, y: 52}, color "#e2e8f0", size 1.
+- Clear spacing for questions or diagrams.
+- Answer boxes: rectangle shape around the answer spot (e.g. width 75, height 32) with color "#2563eb".
+- Clear hints or step scaffolds if helpful.
+"""
+
+
+def _call_gemini_whiteboard_gen(
+    prompt_context: str,
+    user_prompt: str,
+    api_key: str,
+    image_data_url: Optional[str] = None
+) -> Dict[str, Any]:
+    configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+    candidate_models = [configured_model]
+    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    instruction_text = (
+        f"{WHITEBOARD_GEN_SYSTEM_PROMPT}\n\n"
+        f"=== LIVE SESSION CONTEXT & ACTIVE WHITEBOARD DATA ===\n"
+        f"{prompt_context}\n\n"
+        f"TUTOR INSTRUCTION:\n"
+        f"\"{user_prompt}\"\n\n"
+        f"Return STRICT JSON with the generated whiteboard elements tailored to the tutor's prompt and the lesson's question styles."
+    )
+
+    parts: list = [{"text": instruction_text}]
+    if image_data_url:
+        try:
+            if "," in image_data_url:
+                mime_part, b64_data = image_data_url.split(",", 1)
+                mime_type = "image/png" if "png" in mime_part else "image/jpeg"
+            else:
+                b64_data = image_data_url
+                mime_type = "image/jpeg"
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": b64_data
+                }
+            })
+        except Exception as e:
+            logger.warning(f"Failed to attach image to whiteboard gen: {e}")
+
+    last_err = None
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        req_data = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.35
+            }
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(req_data).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=16) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                candidates = result.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    res_parts = candidates[0]["content"].get("parts", [])
+                    if res_parts and "text" in res_parts[0]:
+                        raw_json = _clean_and_parse_json(res_parts[0]["text"])
+                        return _clean_report_math(raw_json)
+        except urllib.error.HTTPError as err:
+            last_err = err
+            logger.warning(f"Gemini model '{model}' failed for whiteboard gen status {err.code}. Trying next candidate...")
+            continue
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Gemini model '{model}' whiteboard gen error: {e}. Trying next candidate...")
+            continue
+
+    if last_err:
+        raise last_err
+    raise ValueError("Empty or invalid response from Gemini API for whiteboard generation")
+
+
+def _call_openai_whiteboard_gen(
+    prompt_context: str,
+    user_prompt: str,
+    api_key: str
+) -> Dict[str, Any]:
+    model = os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    url = "https://api.openai.com/v1/chat/completions"
+
+    full_prompt = (
+        f"{WHITEBOARD_GEN_SYSTEM_PROMPT}\n\n"
+        f"=== LIVE SESSION CONTEXT & ACTIVE WHITEBOARD DATA ===\n"
+        f"{prompt_context}\n\n"
+        f"TUTOR INSTRUCTION:\n"
+        f"\"{user_prompt}\"\n\n"
+        f"Return STRICT JSON with the generated whiteboard elements tailored to the tutor's prompt and the lesson's question styles."
+    )
+
+    req_data = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": WHITEBOARD_GEN_SYSTEM_PROMPT},
+            {"role": "user", "content": full_prompt}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.35
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(req_data).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        },
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as response:
+        result = json.loads(response.read().decode("utf-8"))
+        choices = result.get("choices", [])
+        if choices and "message" in choices[0]:
+            content_str = choices[0]["message"].get("content", "")
+            return _clean_report_math(_clean_and_parse_json(content_str))
+
+    raise ValueError("Empty or invalid response from OpenAI API for whiteboard generation")
+
+
+def _heuristic_whiteboard_content(
+    user_prompt: str,
+    active_elements: Optional[List[Dict[str, Any]]] = None,
+    telemetry: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    board_texts = []
+    if active_elements:
+        for el in active_elements:
+            if el.get("type") == "text" and el.get("text"):
+                board_texts.append(el.get("text"))
+
+    joined_context = (user_prompt + " " + " ".join(board_texts)).lower()
+
+    # 1. Calculus, Integration, 1/x, Graphs, Curves, Coordinate Plots
+    if any(k in joined_context for k in ["1/x", "integral", "integrat", "calculus", "graph", "plot", "curve", "hyperbola", "area under", "ln"]):
+        return {
+            "title": "Graph of y = 1/x and Area Under Curve",
+            "summary": "Visual coordinate plot of y = 1/x showing integration boundaries from x = 1 to x = 3 and the area ln(3).",
+            "width": 540,
+            "height": 360,
+            "elements": [
+                # Card Background & Title
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 540, "y": 360}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Graph of y = 1/x & Definite Integration", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 520, "y": 52}, "color": "#e2e8f0", "size": 1},
+
+                # Coordinate Axes
+                {"type": "shape", "shapeType": "line", "start": {"x": 60, "y": 260}, "end": {"x": 480, "y": 260}, "color": "#334155", "size": 2},
+                {"type": "shape", "shapeType": "arrow", "start": {"x": 470, "y": 260}, "end": {"x": 490, "y": 260}, "color": "#334155", "size": 2},
+                {"type": "text", "text": "x", "x": 496, "y": 265, "color": "#334155", "fontSize": 15, "fontWeight": "bold"},
+
+                {"type": "shape", "shapeType": "line", "start": {"x": 90, "y": 75}, "end": {"x": 90, "y": 280}, "color": "#334155", "size": 2},
+                {"type": "shape", "shapeType": "arrow", "start": {"x": 90, "y": 85}, "end": {"x": 90, "y": 68}, "color": "#334155", "size": 2},
+                {"type": "text", "text": "y", "x": 90, "y": 62, "color": "#334155", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "text", "text": "O", "x": 74, "y": 274, "color": "#64748b", "fontSize": 13},
+
+                # Ticks on X Axis
+                {"type": "shape", "shapeType": "line", "start": {"x": 170, "y": 255}, "end": {"x": 170, "y": 265}, "color": "#475569", "size": 2},
+                {"type": "text", "text": "1", "x": 166, "y": 280, "color": "#1e293b", "fontSize": 13, "fontWeight": "bold"},
+
+                {"type": "shape", "shapeType": "line", "start": {"x": 250, "y": 255}, "end": {"x": 250, "y": 265}, "color": "#475569", "size": 2},
+                {"type": "text", "text": "2", "x": 246, "y": 280, "color": "#64748b", "fontSize": 13},
+
+                {"type": "shape", "shapeType": "line", "start": {"x": 330, "y": 255}, "end": {"x": 330, "y": 265}, "color": "#475569", "size": 2},
+                {"type": "text", "text": "3", "x": 326, "y": 280, "color": "#1e293b", "fontSize": 13, "fontWeight": "bold"},
+
+                # Shaded Integration Region [1 to 3]
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 170, "y": 210}, "end": {"x": 330, "y": 260}, "color": "#bbf7d0", "size": 1, "fillColor": "#f0fdf4"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 170, "y": 210}, "end": {"x": 170, "y": 260}, "color": "#059669", "size": 2},
+                {"type": "shape", "shapeType": "line", "start": {"x": 330, "y": 244}, "end": {"x": 330, "y": 260}, "color": "#059669", "size": 2},
+                {"type": "text", "text": "Area = ln(3)", "x": 215, "y": 238, "color": "#047857", "fontSize": 12, "fontWeight": "bold"},
+
+                # Curve y = 1/x (Connected Smooth Segments)
+                {"type": "shape", "shapeType": "line", "start": {"x": 110, "y": 95}, "end": {"x": 130, "y": 140}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 130, "y": 140}, "end": {"x": 150, "y": 180}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 150, "y": 180}, "end": {"x": 170, "y": 210}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 170, "y": 210}, "end": {"x": 210, "y": 230}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 210, "y": 230}, "end": {"x": 260, "y": 240}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 260, "y": 240}, "end": {"x": 330, "y": 244}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 330, "y": 244}, "end": {"x": 420, "y": 252}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 420, "y": 252}, "end": {"x": 470, "y": 255}, "color": "#2563eb", "size": 3},
+                {"type": "text", "text": "y = 1/x", "x": 185, "y": 195, "color": "#2563eb", "fontSize": 15, "fontWeight": "bold"},
+
+                # Formula & Interactive Checkpoint
+                {"type": "text", "text": "Rule: Integral of (1/x) dx = ln|x| + C", "x": 24, "y": 312, "color": "#1e3a8a", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "Area from 1 to 3: ln(3) - ln(1) = [          ]", "x": 24, "y": 340, "color": "#0f172a", "fontSize": 14},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 224, "y": 322}, "end": {"x": 310, "y": 350}, "color": "#2563eb", "size": 2}
+            ]
+        }
+
+    # 2. Linear Functions, Slope, Intercept
+    elif any(k in joined_context for k in ["linear", "slope", "y = mx", "intercept"]):
+        return {
+            "title": "Linear Function: y = 2x + 1",
+            "summary": "Coordinate plane showing slope triangle (rise over run = 2) and y-intercept at (0, 1).",
+            "width": 520,
+            "height": 340,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 520, "y": 340}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Linear Graph: y = 2x + 1", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 500, "y": 52}, "color": "#e2e8f0", "size": 1},
+                # Axes
+                {"type": "shape", "shapeType": "line", "start": {"x": 50, "y": 200}, "end": {"x": 470, "y": 200}, "color": "#334155", "size": 2},
+                {"type": "shape", "shapeType": "line", "start": {"x": 200, "y": 65}, "end": {"x": 200, "y": 270}, "color": "#334155", "size": 2},
+                {"type": "text", "text": "x", "x": 475, "y": 205, "color": "#334155", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "y", "x": 205, "y": 65, "color": "#334155", "fontSize": 14, "fontWeight": "bold"},
+                # Line y = 2x + 1
+                {"type": "shape", "shapeType": "line", "start": {"x": 100, "y": 260}, "end": {"x": 300, "y": 100}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "circle", "start": {"x": 195, "y": 160}, "end": {"x": 205, "y": 170}, "color": "#dc2626", "size": 2, "fillColor": "#ef4444"},
+                {"type": "text", "text": "(0, 1) y-intercept", "x": 215, "y": 165, "color": "#dc2626", "fontSize": 13, "fontWeight": "600"},
+                # Questions
+                {"type": "text", "text": "1) What is the slope (gradient)?  m = [      ]", "x": 28, "y": 295, "color": "#0f172a", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 275, "y": 278}, "end": {"x": 345, "y": 308}, "color": "#2563eb", "size": 2}
+            ]
+        }
+
+    # 3. Geometry & Triangles
+    elif any(k in joined_context for k in ["geometry", "triangle", "pythagor", "hypotenuse", "angle", "perimeter"]):
+        return {
+            "title": "Right Triangle & Pythagoras Theorem",
+            "summary": "Geometric model of a right-angled triangle with sides 6 and 8, targeting the hypotenuse calculation.",
+            "width": 520,
+            "height": 330,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 520, "y": 330}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Right Triangle: Find Hypotenuse c", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 500, "y": 52}, "color": "#e2e8f0", "size": 1},
+                # Triangle
+                {"type": "shape", "shapeType": "line", "start": {"x": 80, "y": 230}, "end": {"x": 280, "y": 230}, "color": "#1e293b", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 80, "y": 90}, "end": {"x": 80, "y": 230}, "color": "#1e293b", "size": 3},
+                {"type": "shape", "shapeType": "line", "start": {"x": 80, "y": 90}, "end": {"x": 280, "y": 230}, "color": "#2563eb", "size": 3},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 80, "y": 215}, "end": {"x": 95, "y": 230}, "color": "#64748b", "size": 1.5},
+                # Labels
+                {"type": "text", "text": "a = 6", "x": 40, "y": 165, "color": "#0f172a", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "b = 8", "x": 165, "y": 250, "color": "#0f172a", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "c = ?", "x": 190, "y": 145, "color": "#2563eb", "fontSize": 16, "fontWeight": "bold"},
+                # Steps
+                {"type": "text", "text": "Theorem: a² + b² = c²", "x": 310, "y": 105, "color": "#1e3a8a", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "Step 1: 6² + 8² = 36 + 64 = 100", "x": 310, "y": 140, "color": "#475569", "fontSize": 13},
+                {"type": "text", "text": "Step 2: c = sqrt(100) = [      ]", "x": 310, "y": 180, "color": "#0f172a", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 162}, "end": {"x": 490, "y": 195}, "color": "#2563eb", "size": 2}
+            ]
+        }
+
+    # 4. Fractions
+    elif any(k in joined_context for k in ["fraction", "slice", "pizza", "half", "quarter"]):
+        return {
+            "title": "Fraction Comparison Model",
+            "summary": "Visual fraction bar comparison matching student discussion on fractional parts.",
+            "width": 540,
+            "height": 320,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 540, "y": 320}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Fraction Model: Comparing Halves & Quarters", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 520, "y": 52}, "color": "#e2e8f0", "size": 1},
+                {"type": "text", "text": "1 Whole Bar:", "x": 28, "y": 80, "color": "#475569", "fontSize": 14},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 130, "y": 66}, "end": {"x": 490, "y": 96}, "color": "#2563eb", "size": 2, "fillColor": "#eff6ff"},
+                {"type": "text", "text": "1", "x": 305, "y": 87, "color": "#1d4ed8", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "text", "text": "Two Halves (1/2):", "x": 28, "y": 130, "color": "#475569", "fontSize": 14},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 130, "y": 116}, "end": {"x": 310, "y": 146}, "color": "#059669", "size": 2, "fillColor": "#ecfdf5"},
+                {"type": "text", "text": "1/2", "x": 210, "y": 137, "color": "#047857", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 310, "y": 116}, "end": {"x": 490, "y": 146}, "color": "#059669", "size": 2, "fillColor": "#ecfdf5"},
+                {"type": "text", "text": "1/2", "x": 390, "y": 137, "color": "#047857", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "Practice Question:", "x": 28, "y": 185, "color": "#0f172a", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "text", "text": "How many 1/4 parts fit into 1/2?  Answer: [      ]", "x": 36, "y": 220, "color": "#1e293b", "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 372, "y": 202}, "end": {"x": 445, "y": 234}, "color": "#3b82f6", "size": 2},
+                {"type": "text", "text": "Hint: Count how many quarters line up with one half bar.", "x": 36, "y": 275, "color": "#64748b", "fontSize": 13}
+            ]
+        }
+
+    # 5. Subtraction & Regrouping
+    elif any(k in joined_context for k in ["subtraction", "minus", "subtr", "borrow", "take away", "regroup", "21 - 1", "12 - 2"]):
+        return {
+            "title": "Targeted Subtraction Practice",
+            "summary": "Follow-up subtraction problems matching the horizontal equation format used earlier, targeting place value.",
+            "width": 520,
+            "height": 330,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 520, "y": 330}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Targeted Subtraction Practice", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 500, "y": 52}, "color": "#e2e8f0", "size": 1},
+                {"type": "text", "text": "1)  21 - 1 = [       ]", "x": 36, "y": 95, "color": "#0f172a", "fontSize": 17, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 76}, "end": {"x": 215, "y": 108}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "Step: 1 unit taken from 1 unit leaves 0 units -> 2 tens = 20", "x": 48, "y": 126, "color": "#64748b", "fontSize": 13},
+                {"type": "text", "text": "2)  32 - 2 = [       ]", "x": 36, "y": 175, "color": "#0f172a", "fontSize": 17, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 156}, "end": {"x": 215, "y": 188}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "3)  45 - 15 = [       ]", "x": 36, "y": 240, "color": "#0f172a", "fontSize": 17, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 150, "y": 221}, "end": {"x": 225, "y": 253}, "color": "#059669", "size": 2},
+                {"type": "text", "text": "Hint: Subtract the units first, then subtract the tens.", "x": 48, "y": 288, "color": "#059669", "fontSize": 13}
+            ]
+        }
+
+    # 6. Addition
+    elif any(k in joined_context for k in ["add", "plus", "sum"]):
+        return {
+            "title": "Addition Checkpoint",
+            "summary": "Addition problems formatted with answer boxes matching current lesson pacing.",
+            "width": 500,
+            "height": 300,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 500, "y": 300}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "Addition Practice", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 480, "y": 52}, "color": "#e2e8f0", "size": 1},
+                {"type": "text", "text": "1)  18 + 5 = [       ]", "x": 36, "y": 105, "color": "#0f172a", "fontSize": 17, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 86}, "end": {"x": 215, "y": 118}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "2)  27 + 6 = [       ]", "x": 36, "y": 185, "color": "#0f172a", "fontSize": 17, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 166}, "end": {"x": 215, "y": 198}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "Tip: Make a 10 first! 18 + 2 = 20, then add 3.", "x": 36, "y": 250, "color": "#64748b", "fontSize": 13}
+            ]
+        }
+
+    # 7. Dynamic Custom Prompt Parser (Guaranteed Content)
+    else:
+        topic_title = user_prompt.strip().rstrip(".").capitalize() if user_prompt else "Lesson Practice Checkpoint"
+        if len(topic_title) > 42:
+            topic_title = topic_title[:39] + "..."
+
+        return {
+            "title": topic_title,
+            "summary": f"Practice question and guided scaffold created specifically for: '{user_prompt[:50]}'.",
+            "width": 540,
+            "height": 330,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 540, "y": 330}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": topic_title, "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 520, "y": 52}, "color": "#e2e8f0", "size": 1},
+
+                {"type": "text", "text": f"Instruction: {user_prompt[:56]}", "x": 32, "y": 85, "color": "#334155", "fontSize": 14, "fontWeight": "bold"},
+                {"type": "text", "text": "Step 1: Write down the given expression or rule:", "x": 32, "y": 125, "color": "#475569", "fontSize": 14},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 32, "y": 140}, "end": {"x": 500, "y": 185}, "color": "#cbd5e1", "size": 1.5, "fillColor": "#f8fafc"},
+                {"type": "text", "text": "[  Write your intermediate steps and working here  ]", "x": 48, "y": 166, "color": "#94a3b8", "fontSize": 13},
+
+                {"type": "text", "text": "Step 2: Solve for the final value:", "x": 32, "y": 225, "color": "#0f172a", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "text", "text": "Result = [          ]", "x": 270, "y": 225, "color": "#0f172a", "fontSize": 15, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 340, "y": 208}, "end": {"x": 420, "y": 240}, "color": "#2563eb", "size": 2},
+
+                {"type": "text", "text": "Pedagogical Tip: Anchor your reasoning to previous examples before evaluating.", "x": 32, "y": 285, "color": "#059669", "fontSize": 13}
+            ]
+        }
+
+
+def generate_whiteboard_content(
+    telemetry_payload: Dict[str, Any],
+    user_prompt: str,
+    active_elements: Optional[List[Dict[str, Any]]] = None,
+    api_key: Optional[str] = None,
+    provider_override: Optional[str] = None,
+    image_data_url: Optional[str] = None
+) -> Dict[str, Any]:
+    _load_env_file()
+    provider = provider_override or os.environ.get("LLM_PROVIDER", "auto").lower()
+    gemini_key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+
+    if provider == "auto":
+        if gemini_key:
+            provider = "gemini"
+        elif openai_key:
+            provider = "openai"
+        elif os.environ.get("OLLAMA_ENABLED", "").lower() in ("true", "1"):
+            provider = "ollama"
+        else:
+            provider = "heuristic"
+
+    logger.info(f"Generating whiteboard content using provider: {provider} (prompt: '{user_prompt[:60]}...')")
+
+    active_texts = []
+    active_shapes = []
+    if active_elements:
+        for el in active_elements:
+            if el.get("type") == "text" and el.get("text"):
+                active_texts.append(el.get("text"))
+            elif el.get("type") == "shape" and el.get("shapeType"):
+                active_shapes.append(el.get("shapeType"))
+
+    context_lines = []
+    context_lines.append(f"Prompt Context:\n{telemetry_payload.get('llm_prompt_context', '')}\n")
+    if active_texts:
+        context_lines.append(f"Active Texts Currently on Whiteboard:\n{json.dumps(active_texts, indent=2)}")
+    if active_shapes:
+        context_lines.append(f"Active Shapes Currently on Whiteboard:\n{json.dumps(active_shapes, indent=2)}")
+
+    full_context = "\n\n".join(context_lines)
+
+    # 1. Try Gemini
+    if provider == "gemini" and gemini_key:
+        try:
+            content_result = _call_gemini_whiteboard_gen(
+                prompt_context=full_context,
+                user_prompt=user_prompt,
+                api_key=gemini_key,
+                image_data_url=image_data_url
+            )
+            return {
+                "result": content_result,
+                "provider_used": "gemini",
+                "timestamp_ms": int(time.time() * 1000)
+            }
+        except Exception as e:
+            logger.warning(f"Gemini whiteboard generation failed ({e}). Checking fallback providers...")
+
+    # 2. Try OpenAI
+    if (provider == "openai" or openai_key) and openai_key:
+        try:
+            content_result = _call_openai_whiteboard_gen(
+                prompt_context=full_context,
+                user_prompt=user_prompt,
+                api_key=openai_key
+            )
+            return {
+                "result": content_result,
+                "provider_used": "openai",
+                "timestamp_ms": int(time.time() * 1000)
+            }
+        except Exception as e:
+            logger.warning(f"OpenAI whiteboard generation failed ({e}). Falling back to heuristic generator.")
+
+    # 3. Smart Heuristic Engine
+    heuristic_result = _heuristic_whiteboard_content(
+        user_prompt=user_prompt,
+        active_elements=active_elements,
+        telemetry=telemetry_payload
+    )
+    return {
+        "result": _clean_report_math(heuristic_result),
+        "provider_used": "heuristic",
+        "timestamp_ms": int(time.time() * 1000)
+    }
+
+

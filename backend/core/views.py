@@ -241,3 +241,103 @@ class AICoachView(APIView):
             logger.error(f"Error in AICoachView: {e}")
             return Response({'error': str(e), 'room_code': store.room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class AICoachAskView(APIView):
+    """
+    Handles conversational tutor inquiries grounded in live/post-session telemetry.
+    URL: /api/rooms/<room_code>/coach/ask/
+    POST: accepts { prompt, chat_history, apiKey, provider, whiteboardSnapshot }
+          returns { response, provider_used, timestamp_ms }
+    """
+    def post(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            # If the room exists in DB, initialize the in-memory store so post-session inquiry works
+            if MeetingRoom.objects.filter(room_code=room_code, is_active=True).exists():
+                store = manager.get_or_create(room_code)
+            else:
+                return Response({
+                    'active': False,
+                    'room_code': room_code,
+                    'message': 'No active in-memory session for this room code.'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            store = manager.rooms[room_code]
+
+        prompt = request.data.get('prompt', '').strip()
+        if not prompt:
+            return Response({'error': 'Prompt is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        chat_history = request.data.get('chat_history', [])
+        api_key = request.data.get('apiKey')
+        provider = request.data.get('provider')
+        wb_snapshot = request.data.get('whiteboardSnapshot')
+        if wb_snapshot:
+            import time
+            store.update_whiteboard(wb_snapshot, int(time.time() * 1000), 'client')
+
+        from .llm_coach import answer_tutor_inquiry
+
+        try:
+            payload = build_telemetry_payload(store)
+            result = answer_tutor_inquiry(
+                telemetry_payload=payload,
+                user_prompt=prompt,
+                chat_history=chat_history,
+                api_key=api_key,
+                provider_override=provider
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error in AICoachAskView: {e}")
+            return Response({'error': str(e), 'room_code': store.room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class WhiteboardGenerateView(APIView):
+    """
+    Instructs the LLM to generate structured whiteboard content (exercises, diagrams, questions)
+    tailored to the user's prompt and session trends.
+    URL: /api/rooms/<room_code>/whiteboard/generate/
+    POST: accepts { prompt, apiKey, provider, whiteboardSnapshot }
+          returns { result, provider_used, timestamp_ms }
+    """
+    def post(self, request, room_code):
+        room_code = room_code.upper()
+        manager = SessionManager.get_instance()
+        if room_code not in manager.rooms:
+            store = manager.get_or_create(room_code)
+        else:
+            store = manager.rooms[room_code]
+
+        prompt = request.data.get('prompt', '').strip()
+        if not prompt:
+            return Response({'error': 'Prompt is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        api_key = request.data.get('apiKey')
+        provider = request.data.get('provider')
+        wb_snapshot = request.data.get('whiteboardSnapshot')
+        if wb_snapshot:
+            import time
+            store.update_whiteboard(wb_snapshot, int(time.time() * 1000), 'tutor')
+
+        from .llm_coach import generate_whiteboard_content
+
+        try:
+            payload = build_telemetry_payload(store)
+            active_elements = list(store.whiteboard_elements.values())
+            result = generate_whiteboard_content(
+                telemetry_payload=payload,
+                user_prompt=prompt,
+                active_elements=active_elements,
+                api_key=api_key,
+                provider_override=provider,
+                image_data_url=wb_snapshot or (store.most_recent_whiteboard.get("dataUrl") if store.most_recent_whiteboard else None)
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error in WhiteboardGenerateView: {e}")
+            return Response({'error': str(e), 'room_code': store.room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+

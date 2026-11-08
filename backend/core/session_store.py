@@ -117,6 +117,8 @@ class RoomSessionStore:
     whiteboard_elements_log: List[Dict[str, Any]] = field(default_factory=list)
     student_whiteboard_edit_count: int = 0
     tutor_whiteboard_edit_count: int = 0
+    # Active authoritative vector whiteboard elements keyed by element ID
+    whiteboard_elements: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # 2. Video frames store: 0.5s snapshots partitioned by role
     video_frames: Dict[str, List[VideoFrameEntry]] = field(default_factory=lambda: {"tutor": [], "student": []})
@@ -333,6 +335,21 @@ class RoomSessionStore:
         elif role == "tutor":
             self.tutor_whiteboard_edit_count += 1
 
+    def add_whiteboard_element(self, element: Dict[str, Any]):
+        el_id = element.get("id")
+        if el_id:
+            self.whiteboard_elements[el_id] = element
+
+    def remove_whiteboard_element(self, element_id: str):
+        self.whiteboard_elements.pop(element_id, None)
+
+    def remove_whiteboard_elements(self, element_ids: list):
+        for eid in element_ids:
+            self.whiteboard_elements.pop(eid, None)
+
+    def clear_whiteboard_elements(self):
+        self.whiteboard_elements.clear()
+
     def add_video_frame(self, role: str, client_id: str, timestamp: int, data_url: str):
         if role not in self.video_frames:
             self.video_frames[role] = []
@@ -376,6 +393,7 @@ class RoomSessionStore:
         self.all_whiteboards_history.clear()
         self.whiteboard_deltas.clear()
         self.whiteboard_elements_log.clear()
+        self.whiteboard_elements.clear()
         self.student_whiteboard_edit_count = 0
         self.tutor_whiteboard_edit_count = 0
         self.video_frames.clear()

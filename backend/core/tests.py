@@ -557,3 +557,139 @@ class AICoachAndEngagementTests(TestCase):
         store.wipe_session()
         del self.manager.rooms[room_code]
 
+
+class AICoachAskTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.manager = SessionManager.get_instance()
+
+    def test_ai_coach_ask_inquiry(self):
+        room_code = "ASKT1234"
+        MeetingRoom.objects.create(room_code=room_code, title="Math Tutoring", passcode="123")
+        store = self.manager.get_or_create(room_code)
+
+        store.transcripts.append(TranscriptEntry(
+            role="tutor",
+            client_id="tutor_1",
+            timestamp=1000,
+            text="Let's solve 21 - 1 on the whiteboard."
+        ))
+        store.transcripts.append(TranscriptEntry(
+            role="student",
+            client_id="student_1",
+            timestamp=2000,
+            text="I wrote 16."
+        ))
+        store.student_whiteboard_edit_count = 2
+
+        # POST /api/rooms/<room_code>/coach/ask/
+        res = self.client.post(
+            reverse('session-coach-ask', kwargs={'room_code': room_code}),
+            data=json.dumps({
+                "prompt": "How can I help the student with this subtraction misconception?",
+                "provider": "heuristic"
+            }),
+            content_type="application/json"
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("response", data)
+        self.assertIn("provider_used", data)
+        self.assertIn("place value", data["response"].lower())
+
+        # Cleanup
+        store.wipe_session()
+        if room_code in self.manager.rooms:
+            del self.manager.rooms[room_code]
+
+
+class WhiteboardGenerateTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.manager = SessionManager.get_instance()
+
+    def test_whiteboard_generate_endpoint(self):
+        room_code = "GENW1234"
+        MeetingRoom.objects.create(room_code=room_code, title="Math Tutoring", passcode="123")
+        store = self.manager.get_or_create(room_code)
+
+        # Simulate existing tutor work and active elements on whiteboard
+        store.transcripts.append(TranscriptEntry(
+            role="tutor",
+            client_id="tutor_1",
+            timestamp=1000,
+            text="Let's practice subtraction equations."
+        ))
+        store.add_whiteboard_element({
+            "id": "eq_1",
+            "type": "text",
+            "text": "21 - 1 = 16"
+        })
+
+        # POST /api/rooms/<room_code>/whiteboard/generate/
+        res = self.client.post(
+            reverse('whiteboard-generate', kwargs={'room_code': room_code}),
+            data=json.dumps({
+                "prompt": "Create 2 subtraction follow-up problems matching our work",
+                "provider": "heuristic"
+            }),
+            content_type="application/json"
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("result", data)
+        self.assertIn("elements", data["result"])
+        elements = data["result"]["elements"]
+        self.assertGreater(len(elements), 0)
+
+        # Verify elements contain shapes and text without LaTeX $$ notation
+        has_shape = any(el.get("type") == "shape" for el in elements)
+        has_text = any(el.get("type") == "text" for el in elements)
+        self.assertTrue(has_shape)
+        self.assertTrue(has_text)
+        for el in elements:
+            if el.get("type") == "text":
+                self.assertNotIn("$$", el.get("text", ""))
+
+        # Cleanup
+        store.wipe_session()
+        if room_code in self.manager.rooms:
+            del self.manager.rooms[room_code]
+
+    def test_whiteboard_generate_calculus_graph(self):
+        room_code = "CALC1234"
+        MeetingRoom.objects.create(room_code=room_code, title="Calculus Tutoring", passcode="123")
+        store = self.manager.get_or_create(room_code)
+
+        # Prompt for 1/x graph
+        res = self.client.post(
+            reverse('whiteboard-generate', kwargs={'room_code': room_code}),
+            data=json.dumps({
+                "prompt": "We are talking about integrating 1/x. Can you plot a useful graph for this.",
+                "provider": "heuristic"
+            }),
+            content_type="application/json"
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("result", data)
+        result = data["result"]
+        self.assertIn("1/x", result["title"])
+        self.assertIn("elements", result)
+        elements = result["elements"]
+        self.assertGreater(len(elements), 10)
+
+        # Check for axes, curve line segments, and formula text
+        text_contents = " ".join(el.get("text", "") for el in elements if el.get("type") == "text")
+        self.assertIn("1/x", text_contents)
+        self.assertIn("Integral", text_contents)
+        self.assertNotIn("$$", text_contents)
+
+        # Cleanup
+        store.wipe_session()
+        if room_code in self.manager.rooms:
+            del self.manager.rooms[room_code]
+
+
+
+

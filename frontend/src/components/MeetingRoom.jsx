@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X, GripHorizontal, Minimize2, Maximize2 } from 'lucide-react';
+import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X, GripHorizontal, Minimize2, Maximize2, AlertTriangle, GraduationCap, Home, FileText, Wand2 } from 'lucide-react';
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
 import DiagnosticsModal from './DiagnosticsModal';
 import AICoachPanel from './AICoachPanel';
 import EndSessionReportModal from './EndSessionReportModal';
+import AskAICoachModal from './AskAICoachModal';
+import AIWhiteboardGeneratorModal from './AIWhiteboardGeneratorModal';
 import CoachToast from './CoachToast';
 import CoachNotebook from './CoachNotebook';
 import { getWebSocketUrl } from '../config/apiConfig';
@@ -20,8 +22,13 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [transcripts, setTranscripts] = useState([]);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showAICoach, setShowAICoach] = useState(false);
+  const [showAIGenerator, setShowAIGenerator] = useState(false);
   const [showDialogue, setShowDialogue] = useState(false);
   const [showEndReport, setShowEndReport] = useState(false);
+  const [showAskCoach, setShowAskCoach] = useState(false);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [showTutorPostSession, setShowTutorPostSession] = useState(false);
+  const [isSessionEnded, setIsSessionEnded] = useState(false);
 
   // Live Coach Alert Toasts & Notebook
   const [activeToast, setActiveToast] = useState(null);
@@ -63,11 +70,27 @@ const MeetingRoom = ({ session, onLeave }) => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'presence') {
+          if (data.type === 'session_ended') {
+            if (role === 'student') {
+              setIsSessionEnded(true);
+            }
+          } else if (data.type === 'presence') {
             if (data.event === 'user_joined') {
               setPeerPresence(`${data.role === 'tutor' ? 'Tutor' : 'Student'} joined`);
+              if (role === 'tutor' && data.role === 'student') {
+                const elements = whiteboardRef.current?.getElements?.();
+                if (elements && elements.length > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({
+                    type: 'whiteboard_sync',
+                    elements
+                  }));
+                }
+              }
             } else if (data.event === 'user_left') {
               setPeerPresence(`${data.role === 'tutor' ? 'Tutor' : 'Student'} left`);
+              if (data.role === 'tutor' && role === 'student') {
+                setIsSessionEnded(true);
+              }
             }
           } else if (data.type === 'live_transcript') {
             setTranscripts(prev => [...prev.slice(-30), {
@@ -190,7 +213,9 @@ const MeetingRoom = ({ session, onLeave }) => {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({
         type: 'whiteboard_stroke',
-        stroke
+        stroke,
+        role,
+        clientId
       }));
     }
   };
@@ -379,6 +404,34 @@ const MeetingRoom = ({ session, onLeave }) => {
             </button>
           )}
 
+          {/* AI Whiteboard Content Generator Button for Tutor */}
+          {role === 'tutor' && (
+            <button
+              onClick={() => setShowAIGenerator(true)}
+              title="Instruct AI to create exercises, diagrams, and questions tailored to this lesson"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: '6px',
+                backgroundColor: '#0f766e',
+                color: '#ccfbf1',
+                fontSize: '12px',
+                fontWeight: 600,
+                border: '1px solid #14b8a6',
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(20, 184, 166, 0.25)',
+                transition: 'all 0.15s ease'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#115e59'}
+              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#0f766e'}
+            >
+              <Wand2 size={14} color="#5eead4" />
+              <span>AI Draw Prompt</span>
+            </button>
+          )}
+
           {/* Live Dialogue Drawer Toggle */}
           <button
             onClick={() => setShowDialogue(prev => !prev)}
@@ -431,13 +484,7 @@ const MeetingRoom = ({ session, onLeave }) => {
           </span>
 
           <button
-            onClick={() => {
-              if (role === 'tutor') {
-                setShowEndReport(true);
-              } else {
-                onLeave();
-              }
-            }}
+            onClick={() => setShowExitConfirm(true)}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -451,7 +498,7 @@ const MeetingRoom = ({ session, onLeave }) => {
               cursor: 'pointer'
             }}>
             <LogOut size={16} />
-            Exit Session
+            {role === 'tutor' ? 'End Session' : 'Exit Session'}
           </button>
         </div>
       </header>
@@ -646,16 +693,382 @@ const MeetingRoom = ({ session, onLeave }) => {
         onClose={() => setShowAICoach(false)}
       />
 
+      {/* Are You Sure You Want to Exit Confirmation Modal */}
+      {showExitConfirm && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000,
+          userSelect: 'none'
+        }}>
+          <div style={{
+            backgroundColor: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '430px',
+            width: '90%',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 10px 10px -5px rgba(0, 0, 0, 0.4)',
+            color: '#f8fafc'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#ef4444',
+                flexShrink: 0
+              }}>
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: '#f8fafc' }}>
+                  {role === 'tutor' ? 'End Tutoring Session?' : 'Exit Session?'}
+                </h3>
+                <p style={{ margin: '3px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>
+                  Room: {roomCode} ({role})
+                </p>
+              </div>
+            </div>
+
+            <p style={{ fontSize: '13.5px', lineHeight: 1.5, color: '#cbd5e1', margin: '0 0 20px 0' }}>
+              {role === 'tutor'
+                ? 'Ending this session will conclude the call and disconnect all participants.'
+                : 'You will leave this session and disconnect from the live call and collaborative whiteboard.'}
+            </p>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={() => setShowExitConfirm(false)}
+                style={{
+                  padding: '9px 16px',
+                  borderRadius: '8px',
+                  backgroundColor: '#334155',
+                  color: '#f8fafc',
+                  border: '1px solid #475569',
+                  fontSize: '13px',
+                  fontWeight: 500,
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={() => {
+                  if (role === 'tutor') {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                      try {
+                        socket.send(JSON.stringify({
+                          type: 'end_session',
+                          role,
+                          clientId
+                        }));
+                      } catch {}
+                    }
+                    setShowExitConfirm(false);
+                    setShowTutorPostSession(true);
+                  } else {
+                    setShowExitConfirm(false);
+                    onLeave();
+                  }
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '9px 18px',
+                  borderRadius: '8px',
+                  backgroundColor: '#dc2626',
+                  color: '#ffffff',
+                  border: 'none',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 4px rgba(220, 38, 38, 0.3)'
+                }}
+              >
+                <LogOut size={15} />
+                <span>{role === 'tutor' ? 'End Session' : 'Confirm & Exit'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tutor Post-Session Modal: Options to Return to Home Screen or Review Session */}
+      {role === 'tutor' && showTutorPostSession && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.88)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000,
+          userSelect: 'none'
+        }}>
+          <div style={{
+            backgroundColor: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: '16px',
+            padding: '30px 28px',
+            maxWidth: '450px',
+            width: '92%',
+            textAlign: 'center',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)',
+            color: '#f8fafc'
+          }}>
+            <div style={{
+              width: '60px',
+              height: '60px',
+              borderRadius: '50%',
+              backgroundColor: 'rgba(34, 197, 94, 0.15)',
+              border: '2px solid rgba(34, 197, 94, 0.3)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#4ade80',
+              margin: '0 auto 16px auto'
+            }}>
+              <Check size={30} />
+            </div>
+
+            <h2 style={{ margin: '0 0 8px 0', fontSize: '20px', fontWeight: 700, color: '#f8fafc' }}>
+              Session Concluded
+            </h2>
+
+            <p style={{ fontSize: '14px', lineHeight: 1.5, color: '#94a3b8', margin: '0 0 24px 0' }}>
+              The tutoring session has ended and the pupil has been notified. What would you like to do next?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <button
+                onClick={() => {
+                  setShowTutorPostSession(false);
+                  setShowAskCoach(true);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '13px 18px',
+                  borderRadius: '10px',
+                  background: 'linear-gradient(135deg, #4338ca 0%, #6d28d9 100%)',
+                  color: '#ffffff',
+                  border: '1px solid #7c3aed',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  boxShadow: '0 4px 14px rgba(109, 40, 217, 0.4)',
+                  transition: 'transform 0.15s ease, box-shadow 0.15s ease'
+                }}
+              >
+                <Sparkles size={18} color="#e9d5ff" />
+                <span>Ask AI Coach</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowTutorPostSession(false);
+                  setShowEndReport(true);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 18px',
+                  borderRadius: '10px',
+                  backgroundColor: '#1e3a8a',
+                  color: '#bfdbfe',
+                  border: '1px solid #2563eb',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  boxShadow: '0 4px 12px rgba(37, 99, 235, 0.25)',
+                  transition: 'background-color 0.15s ease'
+                }}
+              >
+                <FileText size={17} color="#93c5fd" />
+                <span>Review Session</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowTutorPostSession(false);
+                  onLeave();
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 18px',
+                  borderRadius: '10px',
+                  backgroundColor: '#334155',
+                  color: '#f8fafc',
+                  border: '1px solid #475569',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  transition: 'background-color 0.15s ease'
+                }}
+              >
+                <Home size={17} />
+                <span>Return to Home Screen</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Interactive Ask AI Coach Modal for Tutor */}
+      {role === 'tutor' && (
+        <AskAICoachModal
+          isOpen={showAskCoach}
+          onClose={() => {
+            setShowAskCoach(false);
+            setShowTutorPostSession(true);
+          }}
+          onOpenReviewReport={() => {
+            setShowAskCoach(false);
+            setShowEndReport(true);
+          }}
+          onLeave={onLeave}
+          roomCode={roomCode}
+          title={title}
+          role={role}
+          getWhiteboardSnapshot={() => whiteboardRef.current?.getSnapshotDataUrl?.()}
+        />
+      )}
+
+      {/* AI Whiteboard Content Generator Modal for Tutor */}
+      {role === 'tutor' && (
+        <AIWhiteboardGeneratorModal
+          isOpen={showAIGenerator}
+          onClose={() => setShowAIGenerator(false)}
+          roomCode={roomCode}
+          whiteboardRef={whiteboardRef}
+          getWhiteboardSnapshot={() => whiteboardRef.current?.getSnapshotDataUrl?.()}
+        />
+      )}
+
       {/* Comprehensive End-of-Session Report Modal for Tutor */}
       {role === 'tutor' && (
         <EndSessionReportModal
           isOpen={showEndReport}
-          onClose={() => setShowEndReport(false)}
+          onClose={() => {
+            setShowEndReport(false);
+            setShowTutorPostSession(true);
+          }}
           onConfirmExit={onLeave}
+          onOpenAskCoach={() => {
+            setShowEndReport(false);
+            setShowAskCoach(true);
+          }}
           roomCode={roomCode}
           title={title}
           transcripts={transcripts}
         />
+      )}
+
+      {/* Session Ended Modal for Pupil / Student */}
+      {role === 'student' && isSessionEnded && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.88)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 11000,
+          userSelect: 'none'
+        }}>
+          <div style={{
+            backgroundColor: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: '16px',
+            padding: '32px 28px',
+            maxWidth: '430px',
+            width: '90%',
+            textAlign: 'center',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)',
+            color: '#f8fafc'
+          }}>
+            <div style={{
+              width: '64px',
+              height: '64px',
+              borderRadius: '50%',
+              backgroundColor: 'rgba(59, 130, 246, 0.15)',
+              border: '2px solid rgba(59, 130, 246, 0.3)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#60a5fa',
+              margin: '0 auto 18px auto'
+            }}>
+              <GraduationCap size={32} />
+            </div>
+
+            <h2 style={{ margin: '0 0 8px 0', fontSize: '20px', fontWeight: 700, color: '#f8fafc' }}>
+              Session Has Ended
+            </h2>
+
+            <p style={{ fontSize: '14px', lineHeight: 1.5, color: '#94a3b8', margin: '0 0 24px 0' }}>
+              The tutor has concluded this tutoring session.
+            </p>
+
+            <button
+              onClick={onLeave}
+              style={{
+                width: '100%',
+                padding: '12px 20px',
+                borderRadius: '10px',
+                backgroundColor: '#2563eb',
+                color: '#ffffff',
+                border: 'none',
+                fontSize: '14px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 12px rgba(37, 99, 235, 0.35)',
+                transition: 'background-color 0.15s ease'
+              }}
+            >
+              <Home size={18} />
+              <span>Return to Home Screen</span>
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Live Dialogue & Full Transcript Drawer */}

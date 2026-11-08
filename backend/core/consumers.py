@@ -23,6 +23,20 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
 
     async def disconnect(self, close_code):
         if hasattr(self, 'room_group_name'):
+            # If the tutor left, broadcast session_ended to all peers in the room
+            if self.role == "tutor":
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": self.channel_name,
+                        "payload": {
+                            "type": "session_ended",
+                            "reason": "tutor_left"
+                        }
+                    }
+                )
+
             await self.channel_layer.group_discard(
                 self.room_group_name,
                 self.channel_name
@@ -103,6 +117,21 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "pong"})
             return
 
+        if msg_type == "end_session":
+            # Broadcast session_ended immediately to all peers in the room
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    "type": "room_broadcast",
+                    "sender_channel": self.channel_name,
+                    "payload": {
+                        "type": "session_ended",
+                        "reason": "tutor_ended_session"
+                    }
+                }
+            )
+            return
+
         if msg_type == "request_engagement_pulse":
             manager = SessionManager.get_instance()
             store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
@@ -171,6 +200,22 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
                     "client_id": self.client_id
                 }
             )
+
+            # Send current whiteboard state to joining client immediately
+            if store.whiteboard_elements:
+                await self.send_json({
+                    "type": "whiteboard_init",
+                    "elements": list(store.whiteboard_elements.values())
+                })
+            return
+
+        if msg_type == "request_whiteboard_sync":
+            manager = SessionManager.get_instance()
+            store = manager.get_or_create(self.room_code, on_transcript=self.on_live_transcript)
+            await self.send_json({
+                "type": "whiteboard_init",
+                "elements": list(store.whiteboard_elements.values())
+            })
             return
 
         manager = SessionManager.get_instance()
@@ -186,11 +231,18 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             store.update_whiteboard(data_url, timestamp, role)
             return
 
+        if msg_type == "whiteboard_sync":
+            elements = content.get("elements", [])
+            for el in elements:
+                store.add_whiteboard_element(el)
+            # Fall-through to broadcast to other peers in room
+
         if msg_type == "whiteboard_element":
             element = content.get("element", {})
             role = content.get("role") or element.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or element.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(element, role, client_id, action="create")
+            store.add_whiteboard_element(element)
             # Fall-through to broadcast element to other peers in room
 
         if msg_type == "whiteboard_stroke":
@@ -200,10 +252,25 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             store.record_whiteboard_element(stroke, role, client_id, action="create")
             # Fall-through to broadcast stroke to other peers in room
 
-        if msg_type in ("whiteboard_delete_element", "whiteboard_delete_elements"):
+        if msg_type == "whiteboard_delete_element":
+            element_id = content.get("elementId")
             role = content.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(content, role, client_id, action="delete")
+            if element_id:
+                store.remove_whiteboard_element(element_id)
+            # Fall-through to broadcast to other peers in room
+
+        if msg_type == "whiteboard_delete_elements":
+            element_ids = content.get("elementIds", [])
+            role = content.get("role") or self.role or "unknown"
+            client_id = content.get("clientId") or self.client_id or "unknown"
+            store.record_whiteboard_element(content, role, client_id, action="delete")
+            store.remove_whiteboard_elements(element_ids)
+            # Fall-through to broadcast to other peers in room
+
+        if msg_type == "whiteboard_clear":
+            store.clear_whiteboard_elements()
             # Fall-through to broadcast to other peers in room
 
         # 2. Frequent timestamped Video snapshots (every 0.5s)

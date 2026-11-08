@@ -265,7 +265,8 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
             lines.append(f"    Avg head pose   : yaw={yaw:.1f}° pitch={pitch:.1f}°")
         furrow = vt.get("brow_furrow_avg")
         if furrow is not None:
-            lines.append(f"    Avg brow furrow : {furrow:.2f}")
+            demeanor = "frequent puzzled/hesitant looks" if furrow > 0.35 else ("occasional puzzled looks" if furrow > 0.20 else "relaxed, focused expression")
+            lines.append(f"    Observed demeanor: {demeanor} (index: {furrow:.2f})")
         # Trend excerpt (up to 5 points)
         trend = vt.get("engagement_trend", [])
         if trend:
@@ -276,6 +277,13 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
                 lbl = point.get("engagement_label", "")
                 gz = point.get("gaze", "")
                 lines.append(f"      t={ts}ms  score={sc}  label={lbl}  gaze={gz}")
+
+    lines += [
+        "",
+        "--- INSTRUCTION FOR AI COACH TONE ---",
+        "Describe student demeanor in natural human terms (e.g. 'looked puzzled', 'seemed thoughtful', 'hesitated before writing', 'leaned in with focus').",
+        "NEVER quote raw sensor jargon such as 'brow furrow score', 'eyebrow flutters', or 'facial vector metrics' in your output to the tutor."
+    ]
 
     lines += ["", "--- WHITEBOARD ACTIVITY & PUPIL CONTRIBUTIONS ---"]
     ws = whiteboard_telemetry
@@ -387,7 +395,7 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         status_label = "Student May Be Confused"
         status_color = "red"
         attention_state = "confused"
-        hint = "Elevated brow furrow detected. Pause and ask a check-in question."
+        hint = "Student appears puzzled or hesitant. Pause and ask a quick check-in question."
     elif pct_away >= 0.45 or avg_score < 0.40:
         status_label = "Student Looking Away"
         status_color = "yellow"
