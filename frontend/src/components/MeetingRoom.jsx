@@ -3,7 +3,6 @@ import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
-import DiagnosticsModal from './DiagnosticsModal';
 import AICoachPanel from './AICoachPanel';
 import EndSessionReportModal from './EndSessionReportModal';
 import AskAICoachModal from './AskAICoachModal';
@@ -21,10 +20,8 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [peerPresence, setPeerPresence] = useState('Waiting for student/tutor...');
   const [transcripts, setTranscripts] = useState([]);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showAICoach, setShowAICoach] = useState(false);
   const [showAIGenerator, setShowAIGenerator] = useState(false);
-  const [showDialogue, setShowDialogue] = useState(false);
   const [showEndReport, setShowEndReport] = useState(false);
   const [showAskCoach, setShowAskCoach] = useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -658,23 +655,7 @@ const MeetingRoom = ({ session, onLeave }) => {
           )}
 
 
-          <button
-            onClick={() => setShowDiagnostics(true)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              backgroundColor: '#1e3a8a',
-              color: '#93c5fd',
-              fontSize: '12px',
-              fontWeight: 600,
-              border: '1px solid #2563eb'
-            }}>
-            <Activity size={14} />
-            Inspect Server Data
-          </button>
+
 
           <span style={{
             backgroundColor: role === 'tutor' ? '#1e3a8a' : '#14532d',
@@ -834,13 +815,6 @@ const MeetingRoom = ({ session, onLeave }) => {
         clientId={clientId}
         whiteboardRef={whiteboardRef}
         localStream={localStream}
-      />
-
-      {/* Live Server In-Memory Diagnostics Modal */}
-      <DiagnosticsModal
-        roomCode={roomCode}
-        isOpen={showDiagnostics}
-        onClose={() => setShowDiagnostics(false)}
       />
 
       {/* AI Pedagogical Coach Drawer / Panel */}
