@@ -690,6 +690,131 @@ class WhiteboardGenerateTest(TestCase):
         if room_code in self.manager.rooms:
             del self.manager.rooms[room_code]
 
+    def test_whiteboard_layout_alignment_and_no_overflow(self):
+        from core.llm_coach import _normalize_whiteboard_layout
+
+        unaligned_data = {
+            "title": "Practice 2-Digit Subtraction",
+            "summary": "Generated problems",
+            "width": 540,
+            "height": 360,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 540, "y": 360}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "1)   54 - 18 = [       ]", "x": 40, "y": 110, "color": "#0f172a", "fontSize": 18, "fontWeight": "600"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 190, "y": 92}, "end": {"x": 270, "y": 124}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "2)   72 - 35 = [       ]", "x": 40, "y": 190, "color": "#0f172a", "fontSize": 18, "fontWeight": "600"},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 185, "y": 170}, "end": {"x": 265, "y": 202}, "color": "#2563eb", "size": 2},
+                {"type": "text", "text": "Hint: Remember to check if you need to regroup from the tens column before subtracting the units column in multi-digit problems!", "x": 40, "y": 260, "color": "#475569", "fontSize": 14}
+            ]
+        }
+
+        normalized = _normalize_whiteboard_layout(unaligned_data)
+        elements = normalized["elements"]
+
+        # 1. Answer boxes should share the exact same start.x column
+        answer_boxes = [
+            el for el in elements
+            if el.get("type") == "shape" and el.get("shapeType") == "rectangle"
+            and el.get("start", {}).get("x", 0) > 10
+        ]
+        self.assertEqual(len(answer_boxes), 2)
+        self.assertEqual(answer_boxes[0]["start"]["x"], answer_boxes[1]["start"]["x"])
+
+        # 2. Bracket placeholders should be stripped from text
+        q_texts = [el for el in elements if el.get("type") == "text" and "54 - 18" in el.get("text", "")]
+        self.assertEqual(len(q_texts), 1)
+        self.assertNotIn("[", q_texts[0]["text"])
+
+        # 3. Long text should be wrapped so no single text element overflows
+        hint_texts = [el for el in elements if el.get("type") == "text" and el.get("y", 0) >= 250]
+        self.assertGreater(len(hint_texts), 1)
+        for h in hint_texts:
+            self.assertLess(len(h["text"]), 70)
+
+    def test_two_column_subtraction_all_answer_boxes_consistent(self):
+        from core.llm_coach import _normalize_whiteboard_layout, _heuristic_whiteboard_content
+
+        # Case 1: 10 Subtraction problems in 2 columns where Column 2 has NO answer boxes
+        ten_questions_data = {
+            "title": "10 Subtraction Questions",
+            "summary": "10 problems in 2 columns",
+            "width": 540,
+            "height": 360,
+            "elements": [
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 540, "y": 360}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                {"type": "text", "text": "10 Subtraction Questions", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 520, "y": 52}, "color": "#e2e8f0", "size": 1},
+
+                # Column 1 with existing boxes
+                {"type": "text", "text": "1)   25 - 4 = [       ]", "x": 30, "y": 80, "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 62}, "end": {"x": 190, "y": 92}, "color": "#2563eb"},
+                {"type": "text", "text": "2)   38 - 5 = [       ]", "x": 30, "y": 120, "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 102}, "end": {"x": 190, "y": 132}, "color": "#2563eb"},
+                {"type": "text", "text": "3)   47 - 12 = [       ]", "x": 30, "y": 160, "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 142}, "end": {"x": 190, "y": 172}, "color": "#2563eb"},
+                {"type": "text", "text": "4)   59 - 15 = [       ]", "x": 30, "y": 200, "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 182}, "end": {"x": 190, "y": 212}, "color": "#2563eb"},
+                {"type": "text", "text": "5)   64 - 21 = [       ]", "x": 30, "y": 240, "fontSize": 16},
+                {"type": "shape", "shapeType": "rectangle", "start": {"x": 140, "y": 222}, "end": {"x": 190, "y": 252}, "color": "#2563eb"},
+
+                # Column 2 WITHOUT any answer boxes initially
+                {"type": "text", "text": "6)   78 - 33 = [       ]", "x": 280, "y": 80, "fontSize": 16},
+                {"type": "text", "text": "7)   85 - 41 = [       ]", "x": 280, "y": 120, "fontSize": 16},
+                {"type": "text", "text": "8)   92 - 50 = [       ]", "x": 280, "y": 160, "fontSize": 16},
+                {"type": "text", "text": "9)   67 - 34 = [       ]", "x": 280, "y": 200, "fontSize": 16},
+                {"type": "text", "text": "10) 99 - 45 = [       ]", "x": 280, "y": 240, "fontSize": 16},
+
+                {"type": "text", "text": "Take your time and solve each one step by step!", "x": 30, "y": 300, "fontSize": 13}
+            ]
+        }
+
+        normalized = _normalize_whiteboard_layout(ten_questions_data)
+        elements = normalized["elements"]
+
+        # All 10 questions must have answer boxes
+        boxes = [
+            el for el in elements
+            if el.get("type") == "shape" and el.get("shapeType") == "rectangle"
+            and el.get("start", {}).get("x", 0) > 10
+        ]
+        self.assertEqual(len(boxes), 10, "All 10 questions across both columns must have answer boxes")
+
+        col1_boxes = [b for b in boxes if b["start"]["x"] < 260]
+        col2_boxes = [b for b in boxes if b["start"]["x"] >= 260]
+
+        self.assertEqual(len(col1_boxes), 5, "Column 1 must have exactly 5 answer boxes")
+        self.assertEqual(len(col2_boxes), 5, "Column 2 must have exactly 5 answer boxes")
+
+        # Column 1 boxes must be aligned with each other
+        c1_x = col1_boxes[0]["start"]["x"]
+        for b in col1_boxes:
+            self.assertEqual(b["start"]["x"], c1_x)
+
+        # Column 2 boxes must be aligned with each other and to the right of Column 1
+        c2_x = col2_boxes[0]["start"]["x"]
+        for b in col2_boxes:
+            self.assertEqual(b["start"]["x"], c2_x)
+        self.assertGreater(c2_x, c1_x + 60)
+
+        # Case 2: Heuristic engine generates 10 subtraction problems
+        heuristic = _heuristic_whiteboard_content("I need 10 subtraction questions for my student")
+        h_elements = heuristic["elements"]
+        h_boxes = [
+            el for el in h_elements
+            if el.get("type") == "shape" and el.get("shapeType") == "rectangle"
+            and el.get("start", {}).get("x", 0) > 10
+        ]
+        self.assertEqual(len(h_boxes), 10, "Heuristic generator must produce 10 answer boxes for 10 subtraction questions")
+
+    def test_whiteboard_prompt_automatic_alignment_mandate_injection(self):
+        from core.llm_coach import WHITEBOARD_GEN_SYSTEM_PROMPT
+
+        # Verify that the system prompt and instructions mandate proper alignment and figure construction
+        self.assertIn("columns, rows, diagrams, figures", WHITEBOARD_GEN_SYSTEM_PROMPT.lower())
+        self.assertIn("properly aligned", WHITEBOARD_GEN_SYSTEM_PROMPT.lower())
+        self.assertIn("properly made", WHITEBOARD_GEN_SYSTEM_PROMPT.lower())
+
+
 
 
 

@@ -166,7 +166,42 @@ export default function AIWhiteboardGeneratorModal({
         const fSize = el.fontSize || 16;
         const fWeight = el.fontWeight || 'bold';
         ctx.font = `${fWeight} ${fSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace`;
-        ctx.fillText(el.text, el.x, el.y);
+
+        const rawText = String(el.text || '');
+        const maxWidth = el.maxWidth || Math.max(260, width - el.x - 20);
+        const lineHeight = Math.round(fSize * 1.35);
+
+        const rawLines = rawText.split('\n');
+        let lineY = el.y;
+
+        for (const rawLine of rawLines) {
+          if (!rawLine) {
+            lineY += lineHeight;
+            continue;
+          }
+
+          if (ctx.measureText(rawLine).width <= maxWidth) {
+            ctx.fillText(rawLine, el.x, lineY);
+            lineY += lineHeight;
+          } else {
+            const words = rawLine.split(' ');
+            let currentLine = '';
+            for (let n = 0; n < words.length; n++) {
+              const testLine = currentLine ? `${currentLine} ${words[n]}` : words[n];
+              if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+                ctx.fillText(currentLine, el.x, lineY);
+                currentLine = words[n];
+                lineY += lineHeight;
+              } else {
+                currentLine = testLine;
+              }
+            }
+            if (currentLine) {
+              ctx.fillText(currentLine, el.x, lineY);
+              lineY += lineHeight;
+            }
+          }
+        }
       }
       ctx.restore();
     }
@@ -230,7 +265,9 @@ export default function AIWhiteboardGeneratorModal({
       whiteboardRef.current.insertGeneratedContent({
         elements: generatedContent.elements,
         width: generatedContent.width || 520,
-        height: generatedContent.height || 330
+        height: generatedContent.height || 330,
+        title: generatedContent.title,
+        summary: generatedContent.summary
       });
       setPlacedSuccess(true);
       setTimeout(() => {

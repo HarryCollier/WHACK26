@@ -1061,14 +1061,34 @@ MANDATORY RULES:
   ]
 }
 
-COORDINATE & LAYOUT SYSTEM:
-- Bounding box is typically width ~520-560, height ~320-380 starting at (0, 0).
+COORDINATE & LAYOUT SYSTEM (STRICT ALIGNMENT & SPACING):
+- Bounding box is width ~560, height ~380-420 starting at (0, 0).
 - Card container: A surrounding rectangle with start {x: 0, y: 0}, end {x: width, y: height}, color "#cbd5e1", size 2, and optional soft fillColor "#ffffff".
-- Title banner text at x: 24, y: 40 with fontSize 18, color "#1e3a8a".
+- Title banner text at x: 24, y: 38 with fontSize 18, color "#1e3a8a", fontWeight "bold".
 - Header dividing line from {x: 20, y: 52} to {x: width - 20, y: 52}, color "#e2e8f0", size 1.
-- Clear spacing for questions or diagrams.
-- Answer boxes: rectangle shape around the answer spot (e.g. width 75, height 32) with color "#2563eb".
-- Clear hints or step scaffolds if helpful.
+
+QUESTION & ANSWER BOX ALIGNMENT:
+- EVERY question or equation MUST have its own dedicated answer box rectangle. Never omit answer boxes for any question.
+- Equations and questions MUST be written cleanly without bracket text (e.g., '1)   54 - 18 = ', NOT '1) 54 - 18 = [   ]').
+- For each question at (x: 40, y: textY) with fontSize 16-18:
+  - Draw a neat answer box rectangle next to it.
+  - The box MUST be vertically aligned with the text line: start.y = textY - 22, end.y = textY + 10 (height: 32px, perfectly centered on text baseline).
+  - Multi-column layout: For 6 or more questions (e.g. 10 questions), arrange them in 2 neat balanced columns:
+    * Column 1: Questions 1-5 starting at x: 30-40, with all their answer boxes vertically aligned in column 1 (e.g. x: 170 to 240).
+    * Column 2: Questions 6-10 starting at x: 280-300, with all their answer boxes vertically aligned in column 2 (e.g. x: 420 to 490).
+    * Both columns MUST have answer boxes for every single problem.
+  - In single-column exercises, align all answer boxes in the exact same vertical column.
+  - Never place answer boxes overlapping or colliding with question text.
+
+AUTOMATIC PROPER ALIGNMENT & FIGURE FORMATTING (STRICT REQUIREMENT):
+- Make sure that all columns, rows, diagrams, figures, shapes, and all relevant items are properly aligned, geometrically accurate, and formatted consistently.
+- Ensure that all figures (coordinate plots, curves, axes, geometric shapes, number bars) are properly made with consistent scaling, straight lines, and balanced margins.
+- In multi-column and multi-row layouts, ensure questions and answer boxes form crisp, aligned grids.
+- Ensure all items have comfortable breathing room with zero text overflow and zero overlapping elements.
+
+PREVENT TEXT OVERFLOW:
+- Keep text lines under 45 characters. Text MUST NEVER extend past x = 520.
+- For instructions, story problems, or hints, split them into multiple text elements spaced 22-26px apart vertically.
 """
 
 
@@ -1090,6 +1110,9 @@ def _call_gemini_whiteboard_gen(
         f"{prompt_context}\n\n"
         f"TUTOR INSTRUCTION:\n"
         f"\"{user_prompt}\"\n\n"
+        f"AUTOMATIC ALIGNMENT & FIGURE MANDATE:\n"
+        f"Make sure the columns, rows, diagrams, figures, and all relevant items are properly aligned and formatted consistently, "
+        f"ensuring that all figures and shapes are properly made with exact coordinate spacing and dedicated answer boxes where appropriate.\n\n"
         f"Return STRICT JSON with the generated whiteboard elements tailored to the tutor's prompt and the lesson's question styles."
     )
 
@@ -1164,6 +1187,9 @@ def _call_openai_whiteboard_gen(
         f"{prompt_context}\n\n"
         f"TUTOR INSTRUCTION:\n"
         f"\"{user_prompt}\"\n\n"
+        f"AUTOMATIC ALIGNMENT & FIGURE MANDATE:\n"
+        f"Make sure the columns, rows, diagrams, figures, and all relevant items are properly aligned and formatted consistently, "
+        f"ensuring that all figures and shapes are properly made with exact coordinate spacing and dedicated answer boxes where appropriate.\n\n"
         f"Return STRICT JSON with the generated whiteboard elements tailored to the tutor's prompt and the lesson's question styles."
     )
 
@@ -1349,6 +1375,46 @@ def _heuristic_whiteboard_content(
 
     # 5. Subtraction & Regrouping
     elif any(k in joined_context for k in ["subtraction", "minus", "subtr", "borrow", "take away", "regroup", "21 - 1", "12 - 2"]):
+        if any(k in joined_context for k in ["10", "ten"]):
+            # 10 Subtraction problems in 2 balanced columns, all with answer boxes
+            return {
+                "title": "10 Subtraction Practice Problems",
+                "summary": "10 subtraction problems arranged in 2 columns with dedicated answer boxes for every question.",
+                "width": 580,
+                "height": 380,
+                "elements": [
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 0, "y": 0}, "end": {"x": 580, "y": 380}, "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"},
+                    {"type": "text", "text": "10 Subtraction Practice Problems", "x": 24, "y": 38, "color": "#1e3a8a", "fontSize": 18, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "line", "start": {"x": 20, "y": 52}, "end": {"x": 560, "y": 52}, "color": "#e2e8f0", "size": 1},
+
+                    # Column 1
+                    {"type": "text", "text": "1)   25 - 4 =", "x": 36, "y": 90, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 160, "y": 74}, "end": {"x": 230, "y": 106}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "2)   38 - 12 =", "x": 36, "y": 135, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 160, "y": 119}, "end": {"x": 230, "y": 151}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "3)   47 - 15 =", "x": 36, "y": 180, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 160, "y": 164}, "end": {"x": 230, "y": 196}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "4)   59 - 23 =", "x": 36, "y": 225, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 160, "y": 209}, "end": {"x": 230, "y": 241}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "5)   64 - 18 =", "x": 36, "y": 270, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 160, "y": 254}, "end": {"x": 230, "y": 286}, "color": "#2563eb", "size": 2},
+
+                    # Column 2
+                    {"type": "text", "text": "6)   72 - 35 =", "x": 290, "y": 90, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 74}, "end": {"x": 490, "y": 106}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "7)   83 - 46 =", "x": 290, "y": 135, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 119}, "end": {"x": 490, "y": 151}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "8)   91 - 57 =", "x": 290, "y": 180, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 164}, "end": {"x": 490, "y": 196}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "9)   60 - 24 =", "x": 290, "y": 225, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 209}, "end": {"x": 490, "y": 241}, "color": "#2563eb", "size": 2},
+                    {"type": "text", "text": "10) 95 - 68 =", "x": 290, "y": 270, "color": "#0f172a", "fontSize": 16, "fontWeight": "bold"},
+                    {"type": "shape", "shapeType": "rectangle", "start": {"x": 420, "y": 254}, "end": {"x": 490, "y": 286}, "color": "#2563eb", "size": 2},
+
+                    {"type": "text", "text": "Hint: Subtract units first, then tens. Check regrouping where needed!", "x": 36, "y": 330, "color": "#059669", "fontSize": 13}
+                ]
+            }
+
         return {
             "title": "Targeted Subtraction Practice",
             "summary": "Follow-up subtraction problems matching the horizontal equation format used earlier, targeting place value.",
@@ -1418,6 +1484,277 @@ def _heuristic_whiteboard_content(
         }
 
 
+def _is_whiteboard_question_text(el: Dict[str, Any]) -> bool:
+    """Helper to detect whether a text element is an exercise question/equation expecting an answer box."""
+    if not isinstance(el, dict) or el.get("type") != "text":
+        return False
+    raw_text = el.get("text", "").strip()
+    if not raw_text or el.get("y", 100) < 60:
+        return False
+
+    lower = raw_text.lower()
+    # Skip obvious notes, hints, steps, instructions, axis labels
+    if lower.startswith((
+        "hint", "step", "tip", "pedagogical", "note:", "take your time",
+        "instruction", "rule:", "remember", "check your", "practice question:"
+    )):
+        return False
+    if len(raw_text) <= 2 and not raw_text.endswith("="):
+        return False
+
+    # 1. Numbered items: "1) ...", "1. ...", "(1) ...", "10) ..."
+    if re.search(r'^\s*(?:\d+[\.\)]|\([0-9a-zA-Z]+\))\s+', raw_text):
+        return True
+    # 2. Contains equality or answer placeholder: "=" or "[ ]" or "[   ]"
+    if "=" in raw_text or re.search(r'\[\s*\]', raw_text):
+        return True
+    # 3. Contains "Answer:" or "Result"
+    if "answer:" in lower or "result" in lower:
+        return True
+    # 4. Arithmetic equation: e.g. "25 - 4", "18 + 5"
+    if re.search(r'\d+\s*[\+\-\*\/×÷]\s*\d+', raw_text):
+        return True
+
+    return False
+
+
+def _normalize_whiteboard_layout(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Intelligent layout normalizer:
+    1. Perfect Question & Answer Box Alignment & Consistency:
+       - Detects all questions across 1-column or multi-column layouts (e.g. 10 subtraction questions in 2 columns).
+       - Guarantees EVERY question has its own dedicated answer box (generating any missing boxes).
+       - Prevents Column 2 answer boxes from collapsing into Column 1.
+       - Aligns answer boxes in neat vertical columns per question column.
+       - Removes clunky bracket placeholders like '[      ]' from text when an answer box is drawn.
+    2. Zero Text Overflow:
+       - Automatically wraps long explanation lines/hints that exceed the card's readable width.
+    3. Auto-Card Sizing:
+       - Automatically expands width and height if needed so all content and columns have comfortable breathing room.
+    """
+    if not isinstance(data, dict):
+        return data
+    elements = data.get("elements", [])
+    if not isinstance(elements, list) or not elements:
+        return data
+
+    card_w = data.get("width", 540)
+    card_h = data.get("height", 360)
+
+    # 1. Identify card background and header line
+    card_bg = None
+    header_line = None
+    other_elements = []
+
+    for el in elements:
+        if not isinstance(el, dict):
+            continue
+        if el.get("type") == "shape":
+            st = el.get("start", {})
+            en = el.get("end", {})
+            if el.get("shapeType") == "rectangle" and st.get("x", 99) <= 10 and st.get("y", 99) <= 10 and en.get("x", 0) >= card_w - 40:
+                card_bg = el
+                continue
+            if el.get("shapeType") == "line" and st.get("x", 99) <= 30 and st.get("y", 99) <= 65 and en.get("x", 0) >= card_w - 50:
+                header_line = el
+                continue
+        other_elements.append(el)
+
+    # 2. Separate text elements, candidate answer boxes, and other shapes
+    candidate_answer_boxes = []
+    other_shapes = []
+    for el in other_elements:
+        if el.get("type") == "shape" and el.get("shapeType") == "rectangle":
+            st = el.get("start", {})
+            en = el.get("end", {})
+            w = abs(en.get("x", 0) - st.get("x", 0))
+            h = abs(en.get("y", 0) - st.get("y", 0))
+            fill = el.get("fillColor")
+            is_shaded_region = bool(fill and fill not in ["#ffffff", "#f8fafc", "#faf9f6", "transparent"])
+            if 35 <= w <= 180 and 20 <= h <= 55 and not is_shaded_region and st.get("x", 0) > 0:
+                candidate_answer_boxes.append(el)
+            else:
+                other_shapes.append(el)
+        elif el.get("type") == "shape":
+            other_shapes.append(el)
+
+    text_elements = [el for el in other_elements if el.get("type") == "text"]
+
+    # 3. Detect question text elements and organize into column groups
+    question_elements = [el for el in text_elements if _is_whiteboard_question_text(el)]
+    final_answer_boxes = []
+
+    if question_elements:
+        col_groups = []
+        sorted_by_x = sorted(question_elements, key=lambda q: (q.get("x", 0), q.get("y", 0)))
+        for q in sorted_by_x:
+            qx = q.get("x", 24)
+            placed = False
+            for group in col_groups:
+                avg_x = sum(item.get("x", 24) for item in group) / len(group)
+                if abs(qx - avg_x) <= 75:
+                    group.append(q)
+                    placed = True
+                    break
+            if not placed:
+                col_groups.append([q])
+
+        col_groups.sort(key=lambda g: sum(q.get("x", 24) for q in g) / len(g))
+        for g in col_groups:
+            g.sort(key=lambda q: q.get("y", 0))
+
+        used_box_ids = set()
+
+        for c_idx, col in enumerate(col_groups):
+            col_min_x = min(q.get("x", 24) for q in col)
+            next_col_min_x = min(q.get("x", 24) for q in col_groups[c_idx + 1]) if c_idx + 1 < len(col_groups) else 99999
+
+            col_max_q_end_x = 0
+            for q in col:
+                raw_text = q.get("text", "")
+                cleaned_text = re.sub(r'\[\s*\]', '', raw_text).rstrip()
+                q["text"] = cleaned_text
+                f_size = q.get("fontSize", 16)
+                end_x = q.get("x", 24) + (len(cleaned_text) * (f_size * 0.60))
+                if end_x > col_max_q_end_x:
+                    col_max_q_end_x = end_x
+
+            box_start_x = max(col_min_x + 95, round(col_max_q_end_x + 14))
+            b_w = 70
+            b_h = 32
+
+            for q in col:
+                q_y = q.get("y", 100)
+                f_size = q.get("fontSize", 16)
+                vis_center_y = q_y - (f_size * 0.35)
+
+                best_b = None
+                best_score = 9999
+                for b in candidate_answer_boxes:
+                    b_id = id(b)
+                    if b_id in used_box_ids:
+                        continue
+                    b_st = b.get("start", {})
+                    b_en = b.get("end", {})
+                    b_cx = (b_st.get("x", 0) + b_en.get("x", 0)) / 2
+                    b_cy = (b_st.get("y", 0) + b_en.get("y", 0)) / 2
+
+                    if b_cx < col_min_x - 40 or b_cx >= next_col_min_x - 30:
+                        continue
+                    dy = abs(b_cy - q_y)
+                    if dy <= 45:
+                        dx = abs(b_cx - (col_min_x + 120))
+                        score = dy * 2.5 + dx
+                        if score < best_score:
+                            best_score = score
+                            best_b = b
+
+                if best_b is not None:
+                    used_box_ids.add(id(best_b))
+                    box = best_b
+                else:
+                    # Automatically generate missing answer box for this question!
+                    box = {
+                        "type": "shape",
+                        "shapeType": "rectangle",
+                        "start": {},
+                        "end": {},
+                        "color": "#2563eb",
+                        "size": 2,
+                        "fillColor": "#f8fafc"
+                    }
+
+                box["start"] = {"x": box_start_x, "y": round(vis_center_y - b_h / 2)}
+                box["end"] = {"x": box_start_x + b_w, "y": round(vis_center_y + b_h / 2)}
+                box["color"] = "#2563eb"
+                box["size"] = 2
+                box["fillColor"] = "#f8fafc"
+                final_answer_boxes.append(box)
+
+        # Retain any extra unused candidate shapes (if any) in other_shapes
+        for b in candidate_answer_boxes:
+            if id(b) not in used_box_ids:
+                other_shapes.append(b)
+    else:
+        # If no questions were detected, preserve all original candidate shapes
+        final_answer_boxes.extend(candidate_answer_boxes)
+
+    # 3. Word-wrap overflowing texts
+    final_text_elements = []
+    for txt in text_elements:
+        raw_text = txt.get("text", "")
+        f_size = txt.get("fontSize", 16)
+        x = txt.get("x", 24)
+        y = txt.get("y", 100)
+        avail_w = max(240, card_w - x - 24)
+        char_limit = max(30, int(avail_w / (f_size * 0.58)))
+
+        if len(raw_text) > char_limit and " " in raw_text and not raw_text.startswith(("Rule:", "y =", "Integral")):
+            words = raw_text.split()
+            lines = []
+            curr_line = ""
+            for w in words:
+                test_line = f"{curr_line} {w}" if curr_line else w
+                if len(test_line) > char_limit and curr_line:
+                    lines.append(curr_line)
+                    curr_line = w
+                else:
+                    curr_line = test_line
+            if curr_line:
+                lines.append(curr_line)
+
+            line_h = round(f_size * 1.35)
+            for i, line_str in enumerate(lines):
+                new_t = dict(txt)
+                new_t["text"] = line_str
+                new_t["y"] = y + (i * line_h)
+                final_text_elements.append(new_t)
+        else:
+            final_text_elements.append(txt)
+
+    # 4. Measure bounds and resize card container
+    all_final_items = other_shapes + final_answer_boxes + final_text_elements
+    max_x = card_w
+    max_y = card_h
+
+    for el in all_final_items:
+        if el.get("type") == "shape":
+            st = el.get("start", {})
+            en = el.get("end", {})
+            max_x = max(max_x, st.get("x", 0), en.get("x", 0))
+            max_y = max(max_y, st.get("y", 0), en.get("y", 0))
+        elif el.get("type") == "text":
+            t_y = el.get("y", 0)
+            max_y = max(max_y, t_y + 10)
+
+    final_w = max(card_w, max_x + 28)
+    final_h = max(card_h, max_y + 36)
+
+    result_elements = []
+    if card_bg:
+        card_bg["start"] = {"x": 0, "y": 0}
+        card_bg["end"] = {"x": final_w, "y": final_h}
+        result_elements.append(card_bg)
+    else:
+        result_elements.append({
+            "type": "shape", "shapeType": "rectangle",
+            "start": {"x": 0, "y": 0}, "end": {"x": final_w, "y": final_h},
+            "color": "#cbd5e1", "size": 2, "fillColor": "#ffffff"
+        })
+
+    if header_line:
+        header_line["start"] = {"x": 20, "y": 52}
+        header_line["end"] = {"x": final_w - 20, "y": 52}
+        result_elements.append(header_line)
+
+    result_elements.extend(all_final_items)
+
+    data["width"] = final_w
+    data["height"] = final_h
+    data["elements"] = result_elements
+    return data
+
+
 def generate_whiteboard_content(
     telemetry_payload: Dict[str, Any],
     user_prompt: str,
@@ -1471,7 +1808,7 @@ def generate_whiteboard_content(
                 image_data_url=image_data_url
             )
             return {
-                "result": content_result,
+                "result": _normalize_whiteboard_layout(content_result),
                 "provider_used": "gemini",
                 "timestamp_ms": int(time.time() * 1000)
             }
@@ -1487,7 +1824,7 @@ def generate_whiteboard_content(
                 api_key=openai_key
             )
             return {
-                "result": content_result,
+                "result": _normalize_whiteboard_layout(content_result),
                 "provider_used": "openai",
                 "timestamp_ms": int(time.time() * 1000)
             }
@@ -1501,7 +1838,7 @@ def generate_whiteboard_content(
         telemetry=telemetry_payload
     )
     return {
-        "result": _clean_report_math(heuristic_result),
+        "result": _normalize_whiteboard_layout(_clean_report_math(heuristic_result)),
         "provider_used": "heuristic",
         "timestamp_ms": int(time.time() * 1000)
     }
