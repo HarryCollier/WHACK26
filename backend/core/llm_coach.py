@@ -23,11 +23,18 @@ from typing import Dict, Any, Optional, List
 logger = logging.getLogger(__name__)
 
 # Default provider configurations (can be overridden via environment variables or Django settings)
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-1.5-flash"]
+GEMINI_FALLBACK_MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+]
+_DEPRECATED_GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash", "gemini-3.8-flash"}
 
 
 def _clean_math_formatting(text: str) -> str:
@@ -177,10 +184,12 @@ def _load_env_file():
                             k, v = line.split("=", 1)
                             k = k.strip()
                             v = v.strip().strip("'\"")
-                            if k and k not in os.environ:
+                            if k and (k not in os.environ or (k == "GEMINI_MODEL" and os.environ.get(k) in _DEPRECATED_GEMINI_MODELS)):
                                 os.environ[k] = v
             except Exception:
                 pass
+    if os.environ.get("GEMINI_MODEL", "").strip() in _DEPRECATED_GEMINI_MODELS:
+        os.environ["GEMINI_MODEL"] = DEFAULT_GEMINI_MODEL
 
 
 def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optional[str] = None, provider_override: Optional[str] = None) -> Dict[str, Any]:
@@ -1040,15 +1049,15 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     last_nudge_ts = getattr(store, "last_nudge_timestamp", 0)
     last_nudge_tier = getattr(store, "last_nudge_tier", "T3")
     has_urgent_wrong_answer = (
-        getattr(store, "wrong_attempts_count", 0) >= 2
+        getattr(store, "wrong_attempts_count", 0) >= 1
         or (
             getattr(store, "last_coaching_report", None)
-            and (now - getattr(store, "last_coaching_timestamp", 0)) <= 5000
+            and (now - getattr(store, "last_coaching_timestamp", 0)) <= 20000
             and getattr(store, "last_coaching_report", {}).get("whiteboard_relevance", {}).get("problem_status") == "Answered with misconception"
         )
     )
     if (now - last_nudge_ts) < MIN_NUDGE_INTERVAL_MS and not force_trigger:
-        if not (has_urgent_wrong_answer and last_nudge_tier == "T2"):
+        if not (has_urgent_wrong_answer and last_nudge_tier in ("T1", "T2")):
             return None
 
     # Track recent nudge signatures to prevent repeating the exact same toast
@@ -1066,38 +1075,39 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
 
     wb_elements = getattr(store, "whiteboard_elements_log", [])
 
-    # ── 2. Check for 2+ Consecutive Wrong Attempts on Same Concept (T3 ESCALATION) ──
-    # High-severity rule: Immediate alert with stepping stone & counter-example
+    # ── 2. Check for Wrong Attempt on Active Concept (1st Attempt Immediate Alert) ──
+    # High-severity rule: Immediate alert with stepping stone & custom LLM error breakdown
     wrong_count = getattr(store, "wrong_attempts_count", 0)
-    if wrong_count >= 2:
+    if wrong_count >= 1:
         concept = getattr(store, "active_problem_concept", "") or "active math problem"
         wrong_answers = getattr(store, "consecutive_wrong_answers", [])
-        ans_str = ", ".join(wrong_answers[-2:]) if wrong_answers else "multiple attempts"
-        rep_sig = f"repeat_fail_{concept}_{ans_str}"
+        ans_str = wrong_answers[-1] if wrong_answers else "attempt"
+        rep_sig = f"fail_{concept}_{ans_str}"
         if not is_recently_shown(rep_sig):
             record_shown(rep_sig)
             interventions = build_pedagogical_interventions(concept, ans_str)
-            breakdown_desc = generate_nudge_step_breakdown(concept, student_answer=ans_str, context=f"Student answered incorrectly twice: {ans_str}") if concept else ""
+            breakdown_desc = generate_nudge_step_breakdown(concept, student_answer=ans_str, context=f"Student answered incorrectly: {ans_str}") if concept else ""
 
-            toast_text = f"Student answered incorrectly twice on '{concept}' ({ans_str})"
+            toast_text = f"Student answered '{ans_str}' for '{concept}'"
             if breakdown_desc:
                 toast_text = f"{toast_text} — {breakdown_desc}"
             else:
                 toast_text = f"{toast_text} — {interventions.get('counter_example') or 'pause to ask an open-ended check'}"
 
+            badge_text = "⚠️ Calculation Error" if wrong_count == 1 else "⚠️ 2nd Wrong Attempt"
             return {
                 "tier": "T3",
                 "category": "persistent_misconception",
                 "confidence": "high",
-                "context_badge": "⚠️ 2nd Wrong Attempt",
+                "context_badge": badge_text,
                 "toast_text": toast_text,
                 "action_label": interventions["action_label"],
                 "example_type": interventions["example_type"],
                 "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                 "counter_example": interventions["counter_example"],
                 "custom_diagram": interventions["custom_diagram"],
-                "notebook_entry": f"🔴 Repeated Misconception: Student answered incorrectly 2+ times in a row on '{concept}' ({ans_str}).",
-                "reasoning": f"Pupil has answered incorrectly twice in a row on '{concept}' (attempted {ans_str}). A concrete visual breakdown is strongly recommended to unblock them."
+                "notebook_entry": f"🔴 Misconception Alert: Student answered '{ans_str}' for '{concept}'.",
+                "reasoning": f"Pupil answered incorrectly on '{concept}' (attempted {ans_str}). A concrete visual breakdown is strongly recommended to unblock them."
             }
 
     # ── 3. Check for Student Majority Confusion / Brow Furrow Over 6s Window (T3 Alert) ──

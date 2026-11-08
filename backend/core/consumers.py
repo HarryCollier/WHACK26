@@ -14,6 +14,46 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
         super().__init__(*args, **kwargs)
         self._eval_task = None
 
+    def schedule_math_check(self, store):
+        """
+        Debounces handwritten-equation error checking. Uses a room-level sequence number so
+        rapid strokes only trigger one check after writing pauses, but - unlike the coaching
+        report - an in-flight check is NEVER cancelled by new strokes.
+        """
+        store._math_check_seq = getattr(store, "_math_check_seq", 0) + 1
+        asyncio.create_task(self._run_math_check(store, store._math_check_seq))
+
+    async def _run_math_check(self, store, seq):
+        try:
+            await asyncio.sleep(1.2)
+            if getattr(store, "_math_check_seq", 0) != seq:
+                return  # A newer stroke/snapshot arrived; its own task will run the check
+            lock = getattr(store, "_math_check_lock", None)
+            if lock is None:
+                lock = asyncio.Lock()
+                store._math_check_lock = lock
+            async with lock:
+                snap = store.most_recent_whiteboard or {}
+                data_url = snap.get("dataUrl")
+                from .board_math_checker import check_board_for_errors
+                api_key = getattr(store, "llm_api_key", None)
+                nudges = await asyncio.to_thread(check_board_for_errors, store, data_url, api_key)
+                for nudge in nudges:
+                    import time
+                    store.last_nudge_timestamp = int(time.time() * 1000)
+                    store.last_nudge_tier = "T3"
+                    logger.info(f"[{self.room_code}] Math error flagged: {nudge.get('toast_text')}")
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {
+                            "type": "room_broadcast",
+                            "sender_channel": "",
+                            "payload": {"type": "live_coach_toast", "data": nudge}
+                        }
+                    )
+        except Exception as e:
+            logger.warning(f"[{getattr(self, 'room_code', '?')}] Whiteboard math check failed: {e}", exc_info=True)
+
     def schedule_student_evaluation(self, store):
         """Debounces 2.0s after student finishes writing/drawing, then automatically runs multimodal AI analysis in background"""
         if self._eval_task and not self._eval_task.done():
@@ -31,14 +71,42 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
 
             from .telemetry import build_telemetry_payload
             from .llm_coach import generate_coaching_report, generate_live_nudge
+            from .board_math_checker import check_board_for_errors, apply_nudge_to_coaching_report
+            import time
+
+            api_key = getattr(store, "llm_api_key", None)
+            provider = getattr(store, "llm_provider", None)
+            snap_url = (store.most_recent_whiteboard or {}).get("dataUrl")
+
+            # Ensure deterministic math check has run on the latest board state
+            math_nudges = await asyncio.to_thread(check_board_for_errors, store, snap_url, api_key)
+            for mn in math_nudges:
+                store.last_nudge_timestamp = int(time.time() * 1000)
+                store.last_nudge_tier = "T3"
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "room_broadcast",
+                        "sender_channel": "",
+                        "payload": {"type": "live_coach_toast", "data": mn}
+                    }
+                )
 
             payload = await asyncio.to_thread(build_telemetry_payload, store)
             wb_telem = payload.get("whiteboard_telemetry", {})
             # Analyze if we have a visual snapshot or whiteboard elements log
             if wb_telem.get("has_current") or len(getattr(store, "whiteboard_elements_log", [])) > 0:
-                api_key = getattr(store, "llm_api_key", None)
-                provider = getattr(store, "llm_provider", None)
                 report = await asyncio.to_thread(generate_coaching_report, payload, api_key=api_key, provider_override=provider)
+
+                now_ms = int(time.time() * 1000)
+                active_math_nudge = math_nudges[-1] if math_nudges else (
+                    getattr(store, "_latest_math_nudge", None)
+                    if (now_ms - getattr(store, "_latest_math_nudge_ts", 0)) < 6000
+                    else None
+                )
+                if active_math_nudge:
+                    apply_nudge_to_coaching_report(report, active_math_nudge)
+
                 store.add_coaching_report(report)
 
                 # Broadcast fresh coaching report to all peers (so AI Coach panel updates automatically!)
@@ -55,19 +123,20 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
                 )
 
                 # Immediately evaluate whether fresh report findings warrant a live coach toast
-                nudge = generate_live_nudge(store)
-                if nudge:
-                    await self.channel_layer.group_send(
-                        self.room_group_name,
-                        {
-                            "type": "room_broadcast",
-                            "sender_channel": "",
-                            "payload": {
-                                "type": "live_coach_toast",
-                                "data": nudge
+                if not active_math_nudge:
+                    nudge = generate_live_nudge(store)
+                    if nudge:
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                "type": "room_broadcast",
+                                "sender_channel": "",
+                                "payload": {
+                                    "type": "live_coach_toast",
+                                    "data": nudge
+                                }
                             }
-                        }
-                    )
+                        )
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -330,9 +399,14 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             data_url = content.get("dataUrl", "")
             timestamp = content.get("timestamp", 0)
             role = content.get("role") or self.role or "unknown"
+            prev_url = (store.most_recent_whiteboard or {}).get("dataUrl")
             has_changed = store.update_whiteboard(data_url, timestamp, role)
             if has_changed:
                 self.schedule_student_evaluation(store)
+            # Always re-check equations when the image differs at all: a single thin stroke
+            # (e.g. the final digit of an answer) can fall under the pixel-delta threshold.
+            if data_url and data_url != prev_url:
+                self.schedule_math_check(store)
             return
 
         if msg_type == "whiteboard_sync":
@@ -347,8 +421,9 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId") or element.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(element, role, client_id, action="create")
             store.add_whiteboard_element(element)
-            # Automatically trigger background multimodal AI analysis after drawing pause
+            # Automatically trigger background multimodal AI analysis and math error check after drawing pause
             self.schedule_student_evaluation(store)
+            self.schedule_math_check(store)
             # Fall-through to broadcast element to other peers in room
 
         if msg_type == "whiteboard_stroke":
@@ -357,6 +432,7 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId") or stroke.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(stroke, role, client_id, action="create")
             self.schedule_student_evaluation(store)
+            self.schedule_math_check(store)
             # Fall-through to broadcast stroke to other peers in room
 
         if msg_type == "whiteboard_delete_element":
@@ -367,6 +443,7 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             if element_id:
                 store.remove_whiteboard_element(element_id)
             self.schedule_student_evaluation(store)
+            self.schedule_math_check(store)
             # Fall-through to broadcast to other peers in room
 
         if msg_type == "whiteboard_delete_elements":
@@ -376,6 +453,7 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             store.record_whiteboard_element(content, role, client_id, action="delete")
             store.remove_whiteboard_elements(element_ids)
             self.schedule_student_evaluation(store)
+            self.schedule_math_check(store)
             # Fall-through to broadcast to other peers in room
 
         if msg_type == "whiteboard_clear":
@@ -383,6 +461,9 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element({}, role, client_id, action="clear")
             store.clear_whiteboard_elements()
+            store._math_flagged_signatures = set()
+            store._math_last_image_hash = None
+            store._latest_math_nudge = None
             self.schedule_student_evaluation(store)
             # Fall-through to broadcast to other peers in room
 

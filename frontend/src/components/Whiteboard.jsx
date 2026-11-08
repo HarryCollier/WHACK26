@@ -518,29 +518,31 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (offCtx.fillText) offCtx.fillText('Active Focus: Recent Work', targetW - 160, 18);
     if (offCtx.restore) offCtx.restore();
 
-    // Compute bounding box of active / recent elements (latest 15 elements or viewport)
+    // Compute bounding box across all drawn vector elements on the board (or active viewport)
+    // so equations anywhere on the whiteboard are always captured in full resolution
     const elements = elementsRef.current;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
-    const recentElements = elements.length > 0 ? elements.slice(-15) : [];
-    for (const el of recentElements) {
-      if (el.points && el.points.length > 0) {
-        for (const pt of el.points) {
-          if (pt.x < minX) minX = pt.x;
-          if (pt.x > maxX) maxX = pt.x;
-          if (pt.y < minY) minY = pt.y;
-          if (pt.y > maxY) maxY = pt.y;
+    if (elements.length > 0) {
+      for (const el of elements) {
+        if (el.points && el.points.length > 0) {
+          for (const pt of el.points) {
+            if (pt.x < minX) minX = pt.x;
+            if (pt.x > maxX) maxX = pt.x;
+            if (pt.y < minY) minY = pt.y;
+            if (pt.y > maxY) maxY = pt.y;
+          }
+        } else if (el.start && el.end) {
+          minX = Math.min(minX, el.start.x, el.end.x);
+          maxX = Math.max(maxX, el.start.x, el.end.x);
+          minY = Math.min(minY, el.start.y, el.end.y);
+          maxY = Math.max(maxY, el.start.y, el.end.y);
+        } else if (el.x !== undefined && el.y !== undefined) {
+          minX = Math.min(minX, el.x);
+          maxX = Math.max(maxX, el.x + 120);
+          minY = Math.min(minY, el.y);
+          maxY = Math.max(maxY, el.y + 40);
         }
-      } else if (el.start && el.end) {
-        minX = Math.min(minX, el.start.x, el.end.x);
-        maxX = Math.max(maxX, el.start.x, el.end.x);
-        minY = Math.min(minY, el.start.y, el.end.y);
-        maxY = Math.max(maxY, el.start.y, el.end.y);
-      } else if (el.x !== undefined && el.y !== undefined) {
-        minX = Math.min(minX, el.x);
-        maxX = Math.max(maxX, el.x + 120);
-        minY = Math.min(minY, el.y);
-        maxY = Math.max(maxY, el.y + 40);
       }
     }
 
@@ -555,8 +557,8 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (isFinite(minX) && isFinite(maxX) && isFinite(minY) && isFinite(maxY)) {
       cx = (minX + maxX) / 2;
       cy = (minY + maxY) / 2;
-      spanW = Math.max(maxX - minX + 120, 520);
-      spanH = Math.max(maxY - minY + 100, 340);
+      spanW = Math.max(maxX - minX + 140, 560);
+      spanH = Math.max(maxY - minY + 120, 360);
     } else {
       cx = (vpMinX + vpMaxX) / 2;
       cy = (vpMinY + vpMaxY) / 2;
@@ -579,14 +581,21 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     // Render all vector elements cleanly with role color coding
     const allEls = elementsRef.current;
     const hasExplicitStudent = allEls.some(e => e.role === 'student');
+
+    // SPATIAL ATTRIBUTION RULE:
+    // If strokes exist with role='student', mark them green (#059669).
+    // If in solo mode / single user, or answer is written to the right of an equation:
+    // Any stroke whose center X is to the right of the center of earlier strokes on that horizontal line,
+    // or trailing strokes, are attributed to the student so the Vision AI clearly recognizes question vs answer.
     for (let idx = 0; idx < allEls.length; idx++) {
       const el = allEls[idx];
-      // In solo testing mode (only 1 user), if the user generated/wrote a question and then drew freehand strokes or answers after it,
-      // highlight the trailing answer strokes in green (#059669) so the vision AI distinguishes question from answer attempt.
-      const isTrailingSoloAttempt = !hasExplicitStudent && !el.isCardBox && !el.cardId && idx > 0 && idx >= allEls.length - 4 && (
-        el.type === 'stroke' || (el.type === 'text' && !/[=?]/.test(el.text || ''))
-      );
-      const isStudent = el.role === 'student' || isTrailingSoloAttempt;
+      let isStudent = el.role === 'student';
+      if (!hasExplicitStudent && !el.isCardBox && !el.cardId && allEls.length > 1) {
+        // Trailing answer strokes or strokes drawn in the latter half of the session
+        if (idx >= Math.max(1, allEls.length - 12)) {
+          isStudent = true;
+        }
+      }
       const roleColor = isStudent ? '#059669' : '#0f172a';
       renderElementToCtx(offCtx, el, roleColor);
     }
@@ -601,8 +610,9 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (notifySnapshotChange.current) clearTimeout(notifySnapshotChange.current);
     notifySnapshotChange.current = setTimeout(() => {
       const snap = captureSnapshot();
-      if (snap && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      const activeSocket = socketRef.current || socket;
+      if (snap && activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_snapshot',
           role,
           clientId,
@@ -731,11 +741,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       }
     });
 
+    const activeSocket = socketRef.current || socket;
     for (const el of preparedElements) {
       elementsRef.current.push(el);
       undoStackRef.current.push({ type: 'add', element: el });
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_element',
           element: el,
           role,
@@ -750,6 +761,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
       updateHistoryState();
       redrawAll();
+      triggerSnapshotDispatch();
       return preparedElements;
   };
 
@@ -1760,6 +1772,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
     updateHistoryState();
     redrawAll();
+    triggerSnapshotDispatch();
   };
 
   const handleRedo = () => {
@@ -1844,6 +1857,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
     updateHistoryState();
     redrawAll();
+    triggerSnapshotDispatch();
   };
 
   handleUndoRef.current = handleUndo;
@@ -2596,8 +2610,9 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       pushUndoAction({ type: 'add', element: newDotElement });
       redrawAll();
 
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      const activeSocket = socketRef.current || socket;
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_element',
           element: newDotElement,
           role,
@@ -2636,8 +2651,9 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       elementsRef.current.push(newStrokeElement);
       pushUndoAction({ type: 'add', element: newStrokeElement });
 
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
+      const activeSocket = socketRef.current || socket;
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({
           type: 'whiteboard_element',
           element: newStrokeElement,
           role,

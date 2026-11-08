@@ -239,10 +239,31 @@ class AICoachView(APIView):
             store.llm_provider = provider
 
         try:
-            payload = build_telemetry_payload(store)
             effective_key = api_key or getattr(store, "llm_api_key", None)
             effective_provider = provider or getattr(store, "llm_provider", None)
+
+            # Run deterministic handwritten board math check first so any new wrong equation
+            # is immediately recorded in store before coaching report / live nudge generation.
+            math_nudges = []
+            try:
+                from .board_math_checker import check_board_for_errors, apply_nudge_to_coaching_report
+                snap_url = (store.most_recent_whiteboard or {}).get("dataUrl")
+                math_nudges = check_board_for_errors(store, snap_url, api_key=effective_key)
+            except Exception as math_err:
+                logger.warning(f"Board math check error in AICoachView: {math_err}")
+
+            payload = build_telemetry_payload(store)
             report = generate_coaching_report(payload, api_key=effective_key, provider_override=effective_provider)
+
+            now_ms = int(time.time() * 1000)
+            active_math_nudge = math_nudges[-1] if math_nudges else (
+                getattr(store, "_latest_math_nudge", None)
+                if (now_ms - getattr(store, "_latest_math_nudge_ts", 0)) < 6000
+                else None
+            )
+            if active_math_nudge:
+                apply_nudge_to_coaching_report(report, active_math_nudge)
+
             store.add_coaching_report(report)
 
             # Broadcast fresh coaching report to all connected peers in the room
@@ -262,13 +283,13 @@ class AICoachView(APIView):
                     }
                 )
 
-            # Immediately check if the fresh report warrants a live coaching toast
-            try:
-                from .llm_coach import generate_live_nudge
-                nudge = generate_live_nudge(store)
-                if nudge:
-                    report["live_nudge"] = nudge
-                    if layer:
+            # Broadcast any newly flagged math error toasts immediately
+            if math_nudges:
+                store.last_nudge_timestamp = now_ms
+                store.last_nudge_tier = "T3"
+                report["live_nudge"] = math_nudges[-1]
+                if layer:
+                    for mn in math_nudges:
                         async_to_sync(layer.group_send)(
                             f"meeting_{store.room_code}",
                             {
@@ -276,12 +297,31 @@ class AICoachView(APIView):
                                 "sender_channel": "",
                                 "payload": {
                                     "type": "live_coach_toast",
-                                    "data": nudge
+                                    "data": mn
                                 }
                             }
                         )
-            except Exception as nudge_err:
-                logger.debug(f"Live nudge check error in AICoachView: {nudge_err}")
+            else:
+                # Immediately check if the fresh report warrants a live coaching toast
+                try:
+                    from .llm_coach import generate_live_nudge
+                    nudge = generate_live_nudge(store)
+                    if nudge:
+                        report["live_nudge"] = nudge
+                        if layer:
+                            async_to_sync(layer.group_send)(
+                                f"meeting_{store.room_code}",
+                                {
+                                    "type": "room_broadcast",
+                                    "sender_channel": "",
+                                    "payload": {
+                                        "type": "live_coach_toast",
+                                        "data": nudge
+                                    }
+                                }
+                            )
+                except Exception as nudge_err:
+                    logger.debug(f"Live nudge check error in AICoachView: {nudge_err}")
 
             return Response(report, status=status.HTTP_200_OK)
         except Exception as e:

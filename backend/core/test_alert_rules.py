@@ -245,16 +245,18 @@ class TutorAlertRulesTest(unittest.TestCase):
         self.assertTrue(len(report["areas_for_growth"]) > 0)
 
     def test_2_wrong_attempts_triggers_popup(self):
-        """When student gets 2 attempts wrong, it must trigger a T3 popup."""
+        """When student gets an attempt wrong on the whiteboard, it immediately flags on the 1st attempt and updates on subsequent attempts."""
         store = RoomSessionStore("TEST_WRONG_2")
         store.active_problem_concept = "21 - 1"
         store.record_answer_attempt("21 - 1", "16", is_correct=False)
         self.assertEqual(store.wrong_attempts_count, 1)
-        # 1st attempt should not trigger 2nd-wrong-attempt popup
+        # 1st attempt triggers immediate calculation error alert
         nudge1 = generate_live_nudge(store)
-        self.assertIsNone(nudge1)
+        self.assertIsNotNone(nudge1, "1st wrong attempt should trigger immediate calculation error alert!")
+        self.assertEqual(nudge1["context_badge"], "⚠️ Calculation Error")
 
-        # 2nd wrong attempt
+        # 2nd wrong attempt (simulate time elapsed or distinct answer)
+        store.last_nudge_timestamp = 0
         store.record_answer_attempt("21 - 1", "14", is_correct=False)
         self.assertEqual(store.wrong_attempts_count, 2)
         nudge2 = generate_live_nudge(store)
@@ -298,6 +300,47 @@ class TutorAlertRulesTest(unittest.TestCase):
         self.assertIsNotNone(nudge, "Wrong answer in coaching report must immediately trigger a live popup!")
         self.assertEqual(nudge["tier"], "T3")
         self.assertIn("19", nudge["toast_text"])
+
+    def test_board_math_checker_verifies_and_flags_first_attempt(self):
+        """Handwritten equation checker verifies math deterministically and flags on 1st wrong attempt with explanation & next steps."""
+        from unittest.mock import patch
+        from core.board_math_checker import verify_equation, check_board_for_errors, apply_nudge_to_coaching_report
+
+        # Deterministic equation verification
+        self.assertEqual(verify_equation("33 x 2", "21"), {"status": "incorrect", "expected": "66"})
+        self.assertEqual(verify_equation("12 - 5", "10"), {"status": "incorrect", "expected": "7"})
+        self.assertEqual(verify_equation("12 - 4", "81"), {"status": "incorrect", "expected": "8"})
+        self.assertEqual(verify_equation("6 * 3", "33"), {"status": "incorrect", "expected": "18"})
+        self.assertEqual(verify_equation("12 - 4", "[81]"), {"status": "incorrect", "expected": "8"})
+        self.assertEqual(verify_equation("12 - 4", "8"), {"status": "correct", "expected": "8"})
+
+        store = RoomSessionStore("TEST_HANDWRITTEN_MATH")
+        fake_eqs = [{"lhs": "12 - 4", "rhs": "81"}, {"lhs": "6 * 3", "rhs": "33"}]
+        fake_exp = {
+            "misconception": "The pupil wrote 81 instead of subtracting 4 from 12.",
+            "next_steps": "1. Ask the pupil to count back 4 from 12.\n2. Check if 81 + 4 equals 12.",
+            "ask": "If we start at 12 and take away 4, should the answer be smaller than 12?",
+        }
+        with patch("core.board_math_checker.transcribe_equations", return_value=fake_eqs), \
+             patch("core.board_math_checker.explain_error", return_value=fake_exp):
+            nudges = check_board_for_errors(store, "data:image/jpeg;base64,AAA")
+            self.assertEqual(len(nudges), 2)
+            self.assertEqual(nudges[0]["tier"], "T3")
+            self.assertEqual(nudges[0]["context_badge"], "⚠️ Calculation Error")
+            self.assertIn("81", nudges[0]["toast_text"])
+            self.assertIn("8", nudges[0]["toast_text"])
+            self.assertIn("Next steps:", nudges[0]["stepping_stone"])
+
+            # Same equations on subsequent snapshot should NOT re-flag
+            nudges_repeat = check_board_for_errors(store, "data:image/jpeg;base64,BBB")
+            self.assertEqual(len(nudges_repeat), 0)
+
+            # Report enrichment
+            rep = {"whiteboard_relevance": {}}
+            apply_nudge_to_coaching_report(rep, nudges[-1])
+            self.assertEqual(rep["whiteboard_relevance"]["problem_status"], "Answered with misconception")
+            self.assertEqual(rep["live_nudge"], nudges[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

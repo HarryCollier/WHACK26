@@ -70,7 +70,7 @@ export default function CoachToast({
         left: '50%',
         transform: 'translateX(-50%)',
         width: isHovered ? 'clamp(440px, 65vw, 760px)' : 'clamp(380px, 60vw, 680px)',
-        height: isHovered ? 'auto' : 'clamp(64px, 12vh, 80px)',
+        height: 'auto',
         minHeight: '64px',
         backgroundColor: 'rgba(15, 23, 42, 0.97)',
         backdropFilter: 'blur(16px)',
@@ -81,7 +81,7 @@ export default function CoachToast({
         flexDirection: isHovered ? 'column' : 'row',
         alignItems: isHovered ? 'stretch' : 'center',
         justifyContent: isHovered ? 'flex-start' : 'space-between',
-        padding: isHovered ? '14px 18px' : '0 16px',
+        padding: isHovered ? '14px 18px' : '10px 16px',
         gap: isHovered ? '10px' : '14px',
         zIndex: 45,
         overflow: 'hidden',
@@ -230,15 +230,17 @@ export default function CoachToast({
               {toast.stepping_stone && (
                 <div style={{
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   gap: '4px',
                   backgroundColor: 'rgba(2, 132, 199, 0.25)',
                   border: '1px solid rgba(56, 189, 248, 0.4)',
                   borderRadius: '6px',
-                  padding: '2px 8px',
+                  padding: '3px 8px',
                   fontSize: '11px',
                   color: '#bae6fd',
-                  fontWeight: 600
+                  fontWeight: 600,
+                  whiteSpace: 'pre-line',
+                  lineHeight: 1.35
                 }}>
                   <span>💡</span>
                   <span>{toast.stepping_stone}</span>
