@@ -240,32 +240,57 @@ export default function CoachNotebook({
                               💡 {entry.suggestion}
                             </div>
                             {onApplyExample && (
-                              <button
-                                onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
-                                  title: `💡 Coach Tip: ${entry.category || 'Guidance'}`,
-                                  action_label: entry.suggestion,
-                                  toast_text: entry.text,
-                                  ...entry
-                                })}
-                                title="Drop this guidance onto whiteboard as a draggable card"
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '3px',
-                                  padding: '3px 8px',
-                                  borderRadius: '5px',
-                                  backgroundColor: '#059669',
-                                  color: '#ffffff',
-                                  fontSize: '10.5px',
-                                  fontWeight: 700,
-                                  border: 'none',
-                                  cursor: 'pointer',
-                                  whiteSpace: 'nowrap',
-                                  boxShadow: '0 1px 4px rgba(5, 150, 105, 0.3)'
-                                }}
-                              >
-                                <span>✋ Drop</span>
-                              </button>
+                              <div style={{ display: 'flex', gap: '4px' }}>
+                                {(entry.stepping_stone || entry.text) && (
+                                  <button
+                                    onClick={() => onApplyExample({ type: 'ai_steps', text: entry.stepping_stone || entry.text }, entry)}
+                                    title="Show AI step-by-step breakdown on the shared whiteboard"
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
+                                      padding: '3px 8px',
+                                      borderRadius: '5px',
+                                      backgroundColor: '#0284c7',
+                                      color: '#ffffff',
+                                      fontSize: '10.5px',
+                                      fontWeight: 700,
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                      whiteSpace: 'nowrap',
+                                      boxShadow: '0 1px 4px rgba(2, 132, 199, 0.3)'
+                                    }}
+                                  >
+                                    <span>📋 Show Steps</span>
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => onApplyExample(entry.example_type || 'nudge_hint', {
+                                    title: `💡 Coach Tip: ${entry.category || 'Guidance'}`,
+                                    action_label: entry.suggestion,
+                                    toast_text: entry.text,
+                                    ...entry
+                                  })}
+                                  title="Drop this guidance onto whiteboard as a draggable card"
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '3px',
+                                    padding: '3px 8px',
+                                    borderRadius: '5px',
+                                    backgroundColor: '#059669',
+                                    color: '#ffffff',
+                                    fontSize: '10.5px',
+                                    fontWeight: 700,
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    whiteSpace: 'nowrap',
+                                    boxShadow: '0 1px 4px rgba(5, 150, 105, 0.3)'
+                                  }}
+                                >
+                                  <span>✋ Drop</span>
+                                </button>
+                              </div>
                             )}
                           </div>
                         ) : onApplyExample && (

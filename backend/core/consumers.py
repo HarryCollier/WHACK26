@@ -395,8 +395,8 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId", self.client_id or "unknown")
             store.add_video_frame(role, client_id, timestamp, data_url)
 
-            # Whenever video is processed, push real-time engagement pulse to room
-            if role in ("student", "tutor"):
+            # Only push real-time student face pulses and evaluate facial alerts on student video frames
+            if role == "student":
                 from .telemetry import get_rolling_engagement
                 pulse = get_rolling_engagement(store)
                 await self.channel_layer.group_send(
@@ -411,7 +411,7 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
                     }
                 )
 
-                # Check for live coach alerts triggered by video (rolling confusion while tutor is writing/explaining, looking away)
+                # Check for live coach alerts triggered by student facial cues (confusion while tutor is writing/explaining, looking away)
                 try:
                     from .llm_coach import generate_live_nudge
                     video_nudge = generate_live_nudge(store)

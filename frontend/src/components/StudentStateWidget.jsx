@@ -344,7 +344,7 @@ export default function TutorStudentStateWidget({ roomCode, socket, onOpenReport
  * 2. Mode affective state label with confidence / consistency percentage.
  * 3. Real-time instant expression indicator on hover.
  */
-export function MovableStudentFaceWidget({ roomCode, socket, onOpenReport, initialX, initialY }) {
+export function MovableStudentFaceWidget({ roomCode, socket, onOpenReport, initialX, initialY, role = 'tutor' }) {
   const [pulse, setPulse] = useState({
     engagement_score: 0,
     status_label: 'Waiting for Video',
@@ -513,7 +513,7 @@ export function MovableStudentFaceWidget({ roomCode, socket, onOpenReport, initi
         <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
             <span style={{ fontSize: '9px', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Student Mode (15s)
+              {role === 'student' ? 'Your Emotion' : 'Student Emotion'}
             </span>
             {pulse.student_face_detected && pulse.mode_frequency_pct > 0 && (
               <span style={{ fontSize: '9px', fontWeight: 700, color: themeStyles.text }}>

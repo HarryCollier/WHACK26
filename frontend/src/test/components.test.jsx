@@ -80,7 +80,7 @@ describe('Whiteboard Component', () => {
     expect(screen.getByTitle('Pen')).toBeInTheDocument();
     expect(screen.getByTitle('Highlighter')).toBeInTheDocument();
     expect(screen.getByTitle('Eraser')).toBeInTheDocument();
-    expect(screen.getByTitle(/Hand \(Pan Board\)/i)).toBeInTheDocument();
+    expect(screen.getByTitle(/Moving Object Mode/i)).toBeInTheDocument();
     expect(screen.getByText(/Clear Board/i)).toBeInTheDocument();
     expect(screen.queryByText(/Save Snapshot/i)).toBeNull();
   });

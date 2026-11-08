@@ -151,6 +151,9 @@ def build_telemetry_payload(store: "RoomSessionStore") -> dict:
         "summary": _summarise_whiteboard_deltas(store.whiteboard_deltas),
         "student_edits": getattr(store, "student_whiteboard_edit_count", 0),
         "tutor_edits": getattr(store, "tutor_whiteboard_edit_count", 0),
+        "active_problem_concept": getattr(store, "active_problem_concept", None),
+        "wrong_attempts_count": getattr(store, "wrong_attempts_count", 0),
+        "consecutive_wrong_answers": list(getattr(store, "consecutive_wrong_answers", [])),
         "recent_elements_log": getattr(store, "whiteboard_elements_log", [])[-15:],
         "current_data_url": store.most_recent_whiteboard.get("dataUrl") if store.most_recent_whiteboard else None,
     }
@@ -290,6 +293,10 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
     lines.append(f"  Total snapshots : {ws.get('total_snapshots', 0)}")
     lines.append(f"  Student edits   : {ws.get('student_edits', 0)}")
     lines.append(f"  Tutor edits     : {ws.get('tutor_edits', 0)}")
+    if ws.get("active_problem_concept"):
+        lines.append(f"  Active problem  : {ws.get('active_problem_concept')}")
+    if ws.get("wrong_attempts_count", 0) > 0:
+        lines.append(f"  Wrong attempts  : {ws.get('wrong_attempts_count')} (recent wrong answers: {', '.join(ws.get('consecutive_wrong_answers', []))})")
     if ws.get("current_data_url"):
         lines.append("  Visual Status   : [Whiteboard snapshot image is attached, auto-framed on the active problem. COLOR CODING: Black=Tutor prompts/questions, Green=Pupil answers/work. Attribute questions to tutor and answers to pupil.]")
     summ = ws.get("summary", {})
@@ -328,15 +335,11 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
 def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -> dict:
     """
     Computes a deterministic, real-time engagement indicator and rolling mode
-    facial expression for the tutor based on video telemetry.
+    facial expression strictly for the student based on student video telemetry.
     Defaults to a 6-second window with majority detection (>50% of frames)
     for facial confusion (brow furrow) and distraction.
     """
     student_frames = store.video_frame_features.get("student", [])
-    # Solo / testing fallback: if no student frames yet, use tutor frames so testing works in 1 browser
-    if not student_frames and store.video_frame_features.get("tutor"):
-        student_frames = store.video_frame_features.get("tutor", [])
-
     now_ms = int(time.time() * 1000)
 
     # 1. Filter frames in the recent window (e.g. 6 seconds)
@@ -353,10 +356,10 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -
     faces = [f for f in recent_frames if f.get("face_detected")]
 
     if not recent_frames or not faces:
-        has_raw_frames = len(store.video_frames.get("student", [])) > 0 or len(store.video_frames.get("tutor", [])) > 0
+        has_student_raw = len(store.video_frames.get("student", [])) > 0
         return {
             "engagement_score": 0,
-            "status_label": "No Student Face Detected" if has_raw_frames else "Waiting for Student Video",
+            "status_label": "No Student Face Detected" if has_student_raw else "Waiting for Student Video",
             "status_color": "gray",
             "attention_state": "no_face",
             "mode_expression": "no_face",
@@ -367,10 +370,10 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -
             "instant_color": "gray",
             "instant_label": "No Face",
             "student_face_detected": False,
-            "has_raw_frames": has_raw_frames,
+            "has_raw_frames": has_student_raw,
             "brow_furrow_level": 0.0,
             "gaze_direction": "unknown",
-            "actionable_hint": "Check if student camera is enabled and visible.",
+            "actionable_hint": "Waiting for student to connect camera." if not has_student_raw else "Check if student camera is centered on their face.",
             "pacing": _get_talk_time_pacing(store),
             "timestamp_ms": now_ms,
             "window_seconds": window_seconds,
@@ -492,7 +495,8 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -
     student_wb_edits = getattr(store, "student_whiteboard_edit_count", 0)
     student_wb_active = len(recent_student_actions) > 0
 
-    # Majority states have priority for status label; instant changes provide zero-lag hints
+    # Only show Confused or Distracted status if the student has sustained it for the full 6s window (>50% majority)
+    # Transient instant blips do not flip the widget to red or yellow.
     if is_majority_confused:
         status_label = "Student Confused (Majority)"
         status_color = "red"
@@ -503,16 +507,6 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -
         status_color = "yellow"
         attention_state = "distracted"
         hint = "Student attention is off-screen for majority of last 6s. Prompt them to engage with the whiteboard."
-    elif instant_expression == "confused" or expression_counts["confused"] / len(faces) >= 0.20 or avg_furrow > 0.35:
-        status_label = "Student May Be Confused"
-        status_color = "red"
-        attention_state = "confused"
-        hint = "Elevated brow furrow detected. Check in or offer a stepping stone."
-    elif instant_expression == "distracted" and (expression_counts["distracted"] / len(faces) >= 0.25 or avg_score < 0.40):
-        status_label = "Student Looking Away"
-        status_color = "yellow"
-        attention_state = "distracted"
-        hint = "Student attention is off-screen. Prompt them to engage with the whiteboard."
     elif instant_expression == "engaged" or avg_score >= 0.65:
         status_label = "Attentive & Engaged"
         status_color = "green"
