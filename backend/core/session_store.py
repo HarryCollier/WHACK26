@@ -347,7 +347,7 @@ class RoomSessionStore:
                 delta["current_timestamp"] = timestamp
                 delta["previous_timestamp"] = self.most_recent_whiteboard.get("timestamp")
                 self.whiteboard_deltas.append(delta)
-                if delta.get("change_level") == "none" or delta.get("change_percent", 0) < 0.1:
+                if not delta.get("error") and (delta.get("change_level") == "none" or delta.get("change_percent", 0) < 0.1):
                     has_changed = False
                 logger.debug(f"[{self.room_code}] Whiteboard delta: {delta.get('change_level')} ({delta.get('change_percent')}%)")
             except Exception as e:

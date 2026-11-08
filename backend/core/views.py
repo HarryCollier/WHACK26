@@ -144,7 +144,7 @@ class TelemetryView(APIView):
 
 class EngagementPulseView(APIView):
     """
-    Returns the real-time (15-second rolling) engagement indicator for a live session.
+    Returns the real-time (6-second rolling majority) engagement indicator for a live session.
     URL: /api/rooms/<room_code>/engagement/
     """
     def get(self, request, room_code):
@@ -163,7 +163,7 @@ class EngagementPulseView(APIView):
         else:
             store = manager.rooms[room_code]
         try:
-            pulse = get_rolling_engagement(store, window_seconds=15)
+            pulse = get_rolling_engagement(store, window_seconds=6)
             return Response(pulse, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'error': str(e), 'room_code': room_code}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

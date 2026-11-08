@@ -46,8 +46,11 @@ ALLOWED_HOSTS = ['*']
 
 # Application definition
 
+import sys
+IS_TESTING = 'test' in sys.argv or any('test' in arg for arg in sys.argv) or os.environ.get('TESTING') == '1'
+
 INSTALLED_APPS = [
-    'daphne',
+    *(['daphne'] if not IS_TESTING else []),
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',

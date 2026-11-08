@@ -317,10 +317,12 @@ def _build_prompt_context(dialogue_timeline, video_telemetry, whiteboard_telemet
     return "\n".join(lines)
 
 
-def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) -> dict:
+def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 6) -> dict:
     """
     Computes a deterministic, real-time engagement indicator and rolling mode
     facial expression for the tutor based on video telemetry.
+    Defaults to a 6-second window with majority detection (>50% of frames)
+    for facial confusion (brow furrow) and distraction.
     """
     student_frames = store.video_frame_features.get("student", [])
     # Solo / testing fallback: if no student frames yet, use tutor frames so testing works in 1 browser
@@ -329,13 +331,13 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
 
     now_ms = int(time.time() * 1000)
 
-    # 1. Filter frames in the recent window
+    # 1. Filter frames in the recent window (e.g. 6 seconds)
     if student_frames:
         latest_ts = max(f.get("timestamp_ms", 0) for f in student_frames)
         cutoff_ts = max(0, latest_ts - window_seconds * 1000)
         recent_frames = [f for f in student_frames if f.get("timestamp_ms", 0) >= cutoff_ts]
         if not recent_frames:
-            recent_frames = student_frames[-10:]
+            recent_frames = student_frames[-max(4, window_seconds * 2):]
     else:
         recent_frames = []
 
@@ -362,7 +364,15 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
             "gaze_direction": "unknown",
             "actionable_hint": "Check if student camera is enabled and visible.",
             "pacing": _get_talk_time_pacing(store),
-            "timestamp_ms": now_ms
+            "timestamp_ms": now_ms,
+            "window_seconds": window_seconds,
+            "confused_count": 0,
+            "distracted_count": 0,
+            "total_faces": 0,
+            "confused_pct": 0.0,
+            "distracted_pct": 0.0,
+            "is_majority_confused": False,
+            "is_majority_distracted": False,
         }
 
     # Scores
@@ -372,6 +382,7 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
     avg_furrow = _safe_mean(furrows) or 0.0
 
     # 3. Categorize individual facial expressions for mode calculation
+    # Brow furrow is in the same box as confusion: furrow > 0.35 or att in ("confused", "confused_furrow")
     # Categories: "confused" | "engaged" | "distracted" | "listening"
     expression_counts = {"confused": 0, "engaged": 0, "distracted": 0, "listening": 0}
     for f in faces:
@@ -385,10 +396,28 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
             expression_counts["confused"] += 1
         elif smile > 0.25 or att == "engaged_happy":
             expression_counts["engaged"] += 1
-        elif gaze not in ("screen", "forward", "unknown") and not eye_contact:
+        elif (gaze not in ("screen", "forward", "unknown") and not eye_contact) or att == "distracted":
             expression_counts["distracted"] += 1
         else:
             expression_counts["listening"] += 1
+
+    num_faces = len(faces)
+    confused_count = expression_counts["confused"]
+    distracted_count = expression_counts["distracted"]
+    confused_pct = round(100.0 * confused_count / num_faces, 1) if num_faces > 0 else 0.0
+    distracted_pct = round(100.0 * distracted_count / num_faces, 1) if num_faces > 0 else 0.0
+
+    # Majority calculation: strictly > 50% over window (requires at least 2 frames)
+    is_majority_confused = (confused_count / num_faces > 0.50) if num_faces >= 2 else False
+    is_majority_distracted = (distracted_count / num_faces > 0.50) if num_faces >= 2 else False
+
+    # Combined majority check: if total off-track (confusion + distracted) > 50%, attribute to dominant cue
+    if not is_majority_confused and not is_majority_distracted and num_faces >= 2:
+        if (confused_count + distracted_count) / num_faces > 0.50:
+            if confused_count >= distracted_count:
+                is_majority_confused = True
+            else:
+                is_majority_distracted = True
 
     # Statistical Mode: most frequent expression over the window
     mode_expression = max(expression_counts, key=expression_counts.get)
@@ -447,18 +476,26 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         instant_label = "Listening / Neutral"
 
     # Fast-attack priority for current status:
-    # If the student is actively frowning right now (instant red), don't let 10s of old neutral frames suppress it!
     # If student is actively writing on whiteboard, highlight that.
     recent_student_actions = [
         el for el in getattr(store, "whiteboard_elements_log", [])
         if el.get("role") == "student" and (now_ms - el.get("timestamp", 0)) <= window_seconds * 1000
     ]
     student_wb_edits = getattr(store, "student_whiteboard_edit_count", 0)
-
     student_wb_active = len(recent_student_actions) > 0
 
-    # Fast attack priority: Instantaneous facial expression changes reflect immediately with zero lag!
-    if instant_expression == "confused" or expression_counts["confused"] / len(faces) >= 0.20 or avg_furrow > 0.35:
+    # Majority states have priority for status label; instant changes provide zero-lag hints
+    if is_majority_confused:
+        status_label = "Student Confused (Majority)"
+        status_color = "red"
+        attention_state = "confused"
+        hint = "Majority brow furrow/confusion detected over last 6s. Check in or offer a stepping stone."
+    elif is_majority_distracted:
+        status_label = "Student Looking Away (Majority)"
+        status_color = "yellow"
+        attention_state = "distracted"
+        hint = "Student attention is off-screen for majority of last 6s. Prompt them to engage with the whiteboard."
+    elif instant_expression == "confused" or expression_counts["confused"] / len(faces) >= 0.20 or avg_furrow > 0.35:
         status_label = "Student May Be Confused"
         status_color = "red"
         attention_state = "confused"
@@ -507,7 +544,15 @@ def get_rolling_engagement(store: "RoomSessionStore", window_seconds: int = 15) 
         "student_total_wb_edits": student_wb_edits,
         "actionable_hint": hint,
         "pacing": _get_talk_time_pacing(store),
-        "timestamp_ms": now_ms
+        "timestamp_ms": now_ms,
+        "window_seconds": window_seconds,
+        "confused_count": confused_count,
+        "distracted_count": distracted_count,
+        "total_faces": num_faces,
+        "confused_pct": confused_pct,
+        "distracted_pct": distracted_pct,
+        "is_majority_confused": is_majority_confused,
+        "is_majority_distracted": is_majority_distracted,
     }
 
 

@@ -716,15 +716,15 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "tier": "T3",
                 "category": "visual_confusion",
                 "confidence": "high",
-                "context_badge": "😟 Rolling Confusion",
+                "context_badge": "😟 Confusion (6s)",
                 "toast_text": f"Student looks consistently puzzled/confused while you're explaining '{cur_eq}' — pause to check understanding?",
                 "action_label": interventions["action_label"],
                 "example_type": interventions["example_type"],
                 "stepping_stone": interventions["stepping_stone"],
                 "counter_example": interventions["counter_example"],
                 "custom_diagram": interventions["custom_diagram"],
-                "notebook_entry": f"🔴 Video Detection: Student showing rolling brow furrow/confusion while tutor wrote '{cur_eq}'.",
-                "reasoning": "Sustained brow furrow (rolling mode confused) detected while tutor is writing on whiteboard."
+                "notebook_entry": f"🔴 Video Detection: Student showing majority brow furrow/confusion (>50% over 6s) while tutor wrote '{cur_eq}'.",
+                "reasoning": "Majority brow furrow / confusion (>50% over 6s window) detected while tutor is writing on whiteboard."
             }
         elif any(w in trigger_lower for w in ("pacing", "silence", "quiet")):
             return {
@@ -795,18 +795,14 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "reasoning": f"Pupil has answered incorrectly twice in a row on '{concept}' (attempted {ans_str}). A concrete visual breakdown is strongly recommended to unblock them."
             }
 
-    # ── 3. Check for Student Rolling Average Confusion While Tutor is Explaining/Writing (T3 / T2 Alert) ──
+    # ── 3. Check for Student Majority Confusion / Brow Furrow Over 6s Window (T3 Alert) ──
     from .telemetry import get_rolling_engagement
-    pulse = get_rolling_engagement(store, window_seconds=15)
+    pulse = get_rolling_engagement(store, window_seconds=6)
 
-    is_rolling_confused = (
-        pulse.get("mode_expression") == "confused" or
-        pulse.get("attention_state") == "confused" or
-        pulse.get("brow_furrow_level", 0.0) >= 0.35
-    )
-    is_instant_confused = pulse.get("instant_expression") == "confused"
+    is_majority_confused = pulse.get("is_majority_confused", False)
+    is_majority_distracted = pulse.get("is_majority_distracted", False)
 
-    if (is_rolling_confused or is_instant_confused) and pulse.get("student_face_detected"):
+    if is_majority_confused and pulse.get("student_face_detected"):
         wb_elements = getattr(store, "whiteboard_elements_log", [])
         recent_tutor_wb = [el for el in wb_elements if el.get("role") in ("tutor", "unknown") and (now - el.get("timestamp", 0)) <= 45000]
         if not recent_tutor_wb and store.most_recent_whiteboard and (now - store.most_recent_whiteboard.get("timestamp", 0)) <= 45000:
@@ -829,54 +825,54 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
             if recent_tutor_wb:
                 # Tutor is actively writing/drawing on board
                 return {
-                    "tier": "T3" if is_rolling_confused else "T2",
+                    "tier": "T3",
                     "category": "visual_confusion",
                     "confidence": "high",
-                    "context_badge": "😟 Rolling Confusion",
+                    "context_badge": "😟 Confusion (6s)",
                     "toast_text": f"Student looks puzzled/confused while you're writing '{active_eq or 'on the board'}' — pause to check understanding?",
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
                     "stepping_stone": interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
-                    "notebook_entry": f"🔴 Video Detection: Student showing rolling brow furrow/confusion while tutor wrote '{active_eq or 'on the board'}'.",
-                    "reasoning": "Student shows sustained brow furrow while tutor is writing on the whiteboard."
+                    "notebook_entry": f"🔴 Video Detection: Student showing majority confusion/brow furrow (>50% over 6s) while tutor wrote '{active_eq or 'on the board'}'.",
+                    "reasoning": "Student shows majority brow furrow / confusion (>50% of frames over 6s) while tutor is writing on the whiteboard."
                 }
             elif recent_tutor_transcripts:
                 # Tutor is explaining / speaking
                 return {
-                    "tier": "T3" if is_rolling_confused else "T2",
+                    "tier": "T3",
                     "category": "visual_confusion",
                     "confidence": "high",
-                    "context_badge": "😟 Rolling Confusion",
+                    "context_badge": "😟 Confusion (6s)",
                     "toast_text": "Student appears confused while you're explaining — pause for a check-in?",
                     "action_label": "⏸️ Pause & Check In",
                     "example_type": interventions["example_type"],
                     "stepping_stone": interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
-                    "notebook_entry": "🔴 Video Detection: Student puzzled during verbal explanation.",
-                    "reasoning": "Student shows sustained brow furrow while tutor is speaking."
+                    "notebook_entry": "🔴 Video Detection: Student majority puzzled/confused (>50% over 6s) during verbal explanation.",
+                    "reasoning": "Student shows majority brow furrow / confusion (>50% of frames over 6s) while tutor is speaking."
                 }
             else:
                 # General facial confusion
                 return {
-                    "tier": "T3" if is_rolling_confused else "T2",
+                    "tier": "T3",
                     "category": "visual_confusion",
                     "confidence": "high",
-                    "context_badge": "😟 Rolling Confusion",
+                    "context_badge": "😟 Confusion (6s)",
                     "toast_text": "Student facial confusion (brow furrow) detected — offer a visual example?",
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
                     "stepping_stone": interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
-                    "notebook_entry": "🔴 Video Detection: Student facial expression indicates confusion.",
-                    "reasoning": "Sustained brow furrow / confused face mode identified."
+                    "notebook_entry": "🔴 Video Detection: Student facial expression indicates majority confusion (>50% over 6s).",
+                    "reasoning": "Majority brow furrow / confused face (>50% over 6s window) identified."
                 }
 
-    # ── 4. Check for Student Looking Away / Off-Screen Distraction (T2 Alert) ──
-    if pulse.get("mode_expression") == "distracted" and pulse.get("student_face_detected"):
+    # ── 4. Check for Student Looking Away / Distraction Majority Over 6s Window (T2 Alert) ──
+    if is_majority_distracted and pulse.get("student_face_detected"):
         dist_sig = "face_distracted_gaze"
         if not is_recently_shown(dist_sig):
             record_shown(dist_sig)
@@ -885,11 +881,11 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "category": "pacing",
                 "confidence": "high",
                 "context_badge": "👀 Looking Away",
-                "toast_text": "Student attention has drifted off-screen — prompt them to engage with the board?",
+                "toast_text": "Student attention has drifted off-screen for majority of last 6s — prompt them to engage with the board?",
                 "action_label": "✏️ Invite to Whiteboard",
                 "example_type": "number_line",
-                "notebook_entry": "🟡 Video Detection: Student looking away from screen for extended period.",
-                "reasoning": "Gaze tracking shows student attention consistently directed away from session."
+                "notebook_entry": "🟡 Video Detection: Student looking away from screen for majority of last 6s.",
+                "reasoning": "Gaze tracking shows student attention directed away from session for majority (>50%) of 6s window."
             }
 
     # ── 5. Check Recent Student Spoken Transcripts (T3 Alert) ──

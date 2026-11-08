@@ -276,7 +276,7 @@ const MeetingRoom = ({ session, onLeave }) => {
         demoToast = {
           tier: 'T3',
           category: 'visual_confusion',
-          context_badge: '😟 Rolling Confusion',
+          context_badge: '😟 Confusion (6s)',
           toast_text: "Student looks consistently puzzled/confused while you're explaining '21 - 1' — pause to check understanding?",
           action_label: '📐 Draw 21 - 1 Hop Line',
           example_type: 'place_value',

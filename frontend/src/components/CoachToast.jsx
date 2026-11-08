@@ -5,7 +5,7 @@ import { Sparkles, X, Clock, Check, ArrowRight } from 'lucide-react';
  * CoachToast
  * A compact, non-blocking toast banner taking up ~1/8th of the whiteboard canvas height.
  * - T2: Glanceable action toast (auto-dismisses in 4 seconds with countdown bar).
- * - T3: Persistent nudge for sustained confusion (≥10s) or repeated mistakes (stays until tapped).
+ * - T3: Persistent nudge for majority confusion (>50% over 6s) or repeated mistakes (stays until tapped).
  * - Primary Action: "Drop on Board" triggers instant visual diagram on the shared whiteboard.
  */
 export default function CoachToast({
@@ -208,7 +208,7 @@ export default function CoachToast({
                 {isT3 ? 'Nudge' : 'Quick Tip'}
               </span>
               <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-                {toast.context_badge || (isT3 ? '10s sustained confusion' : 'Actionable suggestion')}
+                {toast.context_badge || (isT3 ? 'Majority confusion (6s)' : 'Actionable suggestion')}
               </span>
             </div>
           )}
