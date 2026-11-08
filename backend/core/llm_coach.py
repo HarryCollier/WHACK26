@@ -1163,9 +1163,10 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     wb_elements = getattr(store, "whiteboard_elements_log", [])
 
     # ── 2. Check for Wrong Attempt on Active Concept (1st Attempt Immediate Alert) ──
-    # High-severity rule: Immediate alert with stepping stone & custom LLM error breakdown
+    # When board_math_checker is active for the room, it already emits the authoritative toast
+    # for each new wrong equation once, so skip duplicate emission here.
     wrong_count = getattr(store, "wrong_attempts_count", 0)
-    if wrong_count >= 1:
+    if wrong_count >= 1 and not getattr(store, "_math_checker_active", False):
         concept = getattr(store, "active_problem_concept", "") or "active math problem"
         wrong_answers = getattr(store, "consecutive_wrong_answers", [])
         ans_str = wrong_answers[-1] if wrong_answers else "attempt"
@@ -1358,7 +1359,7 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     ]
 
     # Freshness guard: Coaching report must be fresh (<= 20 seconds)
-    if last_report and (now - last_coaching_ts) <= 20000 and len(tutor_new_questions_after) == 0:
+    if last_report and not getattr(store, "_math_checker_active", False) and (now - last_coaching_ts) <= 20000 and len(tutor_new_questions_after) == 0:
         wb_rel = last_report.get("whiteboard_relevance", {})
         active_eq = wb_rel.get("current_active_equation", "").strip()
         pupil_work = wb_rel.get("pupil_latest_work", "").strip()

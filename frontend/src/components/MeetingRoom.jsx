@@ -41,10 +41,42 @@ const MeetingRoom = ({ session, onLeave }) => {
     nudgesEnabledRef.current = nudgesEnabled;
   }, [nudgesEnabled]);
   const [activeToast, setActiveToast] = useState(null);
+  const shownToastSignaturesRef = useRef(new Set());
   const [notebookEntries, setNotebookEntries] = useState([
     { id: '1', tier: 'T1', category: 'Pacing', text: 'Session active. Audio transcription and visual canvas ready.', timestamp: Date.now(), read: true }
   ]);
   const [isNotebookOpen, setIsNotebookOpen] = useState(false);
+
+  const showDeduplicatedToast = (toast) => {
+    if (!toast) return;
+    const sig = toast.signature || (toast.equation && toast.student_answer ? `${toast.equation}=${toast.student_answer}` : (toast.toast_text || ''));
+    if (sig && shownToastSignaturesRef.current.has(sig)) {
+      return;
+    }
+    if (sig) {
+      shownToastSignaturesRef.current.add(sig);
+    }
+    setActiveToast(toast);
+    setNotebookEntries(prev => {
+      const noteText = toast.notebook_entry || toast.toast_text;
+      if (prev.some(e => e.text === noteText)) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: `entry_${Date.now()}`,
+          tier: toast.tier || 'T3',
+          category: toast.category || 'Confusion',
+          text: noteText,
+          stepping_stone: toast.stepping_stone,
+          suggestion: toast.action_label,
+          timestamp: Date.now(),
+          read: false
+        }
+      ];
+    });
+  };
 
   // Live Coach Notes: Exactly 2 Positives & 2 Negatives (synced on 2-minute cadence)
   const [coachNotes, setCoachNotes] = useState({
@@ -125,22 +157,11 @@ const MeetingRoom = ({ session, onLeave }) => {
               text: data.text,
               timestamp: data.timestamp
             }]);
+          } else if (data.type === 'whiteboard_clear') {
+            shownToastSignaturesRef.current.clear();
           } else if (data.type === 'live_coach_toast' && data.data) {
             if (role === 'tutor' && nudgesEnabledRef.current) {
-              setActiveToast(data.data);
-              setNotebookEntries(prev => [
-                ...prev,
-                {
-                  id: `entry_${Date.now()}`,
-                  tier: data.data.tier,
-                  category: data.data.category || 'Confusion',
-                  text: data.data.notebook_entry || data.data.toast_text,
-                  stepping_stone: data.data.stepping_stone,
-                  suggestion: data.data.action_label,
-                  timestamp: Date.now(),
-                  read: false
-                }
-              ]);
+              showDeduplicatedToast(data.data);
             }
           } else if (data.type === 'coaching_report_updated' && data.data) {
             const rep = data.data;
@@ -253,26 +274,7 @@ const MeetingRoom = ({ session, onLeave }) => {
           });
         }
         if (rep?.live_nudge && nudgesEnabledRef.current) {
-          setActiveToast(rep.live_nudge);
-          setNotebookEntries(prev => {
-            const noteText = rep.live_nudge.notebook_entry || rep.live_nudge.toast_text;
-            if (prev.some(e => e.text === noteText && (Date.now() - e.timestamp) < 15000)) {
-              return prev;
-            }
-            return [
-              ...prev,
-              {
-                id: `entry_${Date.now()}`,
-                tier: rep.live_nudge.tier || 'T3',
-                category: rep.live_nudge.category || 'Confusion',
-                text: noteText,
-                stepping_stone: rep.live_nudge.stepping_stone,
-                suggestion: rep.live_nudge.action_label,
-                timestamp: Date.now(),
-                read: false
-              }
-            ];
-          });
+          showDeduplicatedToast(rep.live_nudge);
         }
       }
       studentEditsSinceLastEval.current = 0;
@@ -955,7 +957,7 @@ const MeetingRoom = ({ session, onLeave }) => {
         onClose={() => setShowAICoach(false)}
         onLiveNudge={(nudge) => {
           if (role === 'tutor' && nudgesEnabledRef.current) {
-            setActiveToast(nudge);
+            showDeduplicatedToast(nudge);
           }
         }}
       />

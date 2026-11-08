@@ -335,11 +335,17 @@ class TutorAlertRulesTest(unittest.TestCase):
             nudges_repeat = check_board_for_errors(store, "data:image/jpeg;base64,BBB")
             self.assertEqual(len(nudges_repeat), 0)
 
-            # Report enrichment
+            # Report enrichment does not re-attach live_nudge by default (prevents duplicate HTTP popup)
             rep = {"whiteboard_relevance": {}}
             apply_nudge_to_coaching_report(rep, nudges[-1])
             self.assertEqual(rep["whiteboard_relevance"]["problem_status"], "Answered with misconception")
-            self.assertEqual(rep["live_nudge"], nudges[-1])
+            self.assertNotIn("live_nudge", rep)
+
+            # generate_live_nudge must NOT emit a duplicate toast for an error already flagged by board_math_checker
+            store.add_coaching_report(rep)
+            store.last_nudge_timestamp = 0
+            dup_nudge = generate_live_nudge(store)
+            self.assertIsNone(dup_nudge, "generate_live_nudge must not double-count an error already flagged by board_math_checker")
 
 
 if __name__ == "__main__":

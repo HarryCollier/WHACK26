@@ -347,7 +347,8 @@ def transcribe_equations(image_data_url: str, api_key: Optional[str] = None) -> 
         for e in eqs or []:
             if not isinstance(e, dict):
                 continue
-            lhs, rhs = str(e.get("lhs", "")).strip(), str(e.get("rhs", "")).strip()
+            lhs = str(e.get("lhs", "")).strip()
+            rhs = str(e.get("rhs", "")).strip()
             if lhs:
                 out.append({"lhs": lhs, "rhs": rhs})
         return out
@@ -464,10 +465,12 @@ def build_error_nudge(lhs: str, rhs: str, expected: str, explanation: Dict[str, 
         "equation": question,
         "student_answer": rhs,
         "expected_answer": expected,
+        "signature": _eq_signature(lhs, rhs),
     }
 
 
-def apply_nudge_to_coaching_report(report: Dict[str, Any], nudge: Dict[str, Any]) -> Dict[str, Any]:
+def apply_nudge_to_coaching_report(report: Dict[str, Any], nudge: Dict[str, Any],
+                                   include_live_nudge: bool = False) -> Dict[str, Any]:
     """Enriches a coaching report dict with the deterministic math error nudge."""
     if not report or not nudge:
         return report
@@ -487,7 +490,8 @@ def apply_nudge_to_coaching_report(report: Dict[str, Any], nudge: Dict[str, Any]
     wb_rel["alignment_score"] = 95
 
     report["areas_for_growth"] = f"Student answered '{ans}' for '{eq}' (expected {exp}). {reason}"
-    report["live_nudge"] = nudge
+    if include_live_nudge:
+        report["live_nudge"] = nudge
     return report
 
 
@@ -522,18 +526,18 @@ def check_board_for_errors(store: Any, image_data_url: Optional[str] = None,
         if equations is None:
             return []
         logger.info(f"[MathChecker] Transcribed board equations: {equations}")
+        store._math_checker_active = True
 
         flagged = getattr(store, "_math_flagged_signatures", None)
         if flagged is None:
             flagged = set()
             store._math_flagged_signatures = flagged
 
-        # Keep signatures of equations currently visible on the board; if a student erases
-        # an equation and rewrites it later, it will be checked fresh.
-        current_sigs = {_eq_signature(eq["lhs"], eq["rhs"]) for eq in equations if eq.get("rhs")}
-        flagged.intersection_update(current_sigs)
+        if not hasattr(store, "recent_nudge_signatures"):
+            store.recent_nudge_signatures = {}
 
         nudges = []
+        now_ms = int(time.time() * 1000)
         for eq in equations:
             lhs, rhs = eq["lhs"], eq["rhs"]
             if not rhs:
@@ -559,12 +563,21 @@ def check_board_for_errors(store: Any, image_data_url: Optional[str] = None,
             except Exception:
                 pass
 
+            # Mark all equivalent nudge signatures in store.recent_nudge_signatures so
+            # generate_live_nudge never fires a duplicate toast for this same equation.
+            concept = getattr(store, "active_problem_concept", "") or f"{lhs} ="
+            for eq_key in {concept, f"{lhs} =", lhs.strip(), lhs.replace("*", "×").strip() + " ="}:
+                store.recent_nudge_signatures[f"fail_{eq_key}_{rhs}"] = now_ms
+                store.recent_nudge_signatures[f"misc_{eq_key}_{rhs}"] = now_ms
+            store.recent_nudge_signatures[sig] = now_ms
+            store._math_checker_handled_wrong_count = getattr(store, "wrong_attempts_count", 0)
+
             explanation = explain_error(lhs, rhs, result["expected"], api_key=api_key)
             nudge = build_error_nudge(lhs, rhs, result["expected"], explanation)
             nudges.append(nudge)
 
         if nudges:
             store._latest_math_nudge = nudges[-1]
-            store._latest_math_nudge_ts = int(time.time() * 1000)
+            store._latest_math_nudge_ts = now_ms
 
         return nudges
