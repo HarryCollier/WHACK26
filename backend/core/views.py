@@ -266,18 +266,20 @@ class AICoachView(APIView):
             try:
                 from .llm_coach import generate_live_nudge
                 nudge = generate_live_nudge(store)
-                if nudge and layer:
-                    async_to_sync(layer.group_send)(
-                        f"meeting_{store.room_code}",
-                        {
-                            "type": "room_broadcast",
-                            "sender_channel": "",
-                            "payload": {
-                                "type": "live_coach_toast",
-                                "data": nudge
+                if nudge:
+                    report["live_nudge"] = nudge
+                    if layer:
+                        async_to_sync(layer.group_send)(
+                            f"meeting_{store.room_code}",
+                            {
+                                "type": "room_broadcast",
+                                "sender_channel": "",
+                                "payload": {
+                                    "type": "live_coach_toast",
+                                    "data": nudge
+                                }
                             }
-                        }
-                    )
+                        )
             except Exception as nudge_err:
                 logger.debug(f"Live nudge check error in AICoachView: {nudge_err}")
 

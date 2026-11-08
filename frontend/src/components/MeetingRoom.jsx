@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X, GripHorizontal, Minimize2, Maximize2, AlertTriangle, GraduationCap, Home, FileText, Wand2 } from 'lucide-react';
+import { LogOut, Copy, Check, Users, Radio, MessageSquare, Activity, Sparkles, X, GripHorizontal, Minimize2, Maximize2, AlertTriangle, GraduationCap, Home, FileText, Wand2, Bell, BellOff } from 'lucide-react';
 import Whiteboard from './Whiteboard';
 import VideoCall from './VideoCall';
 import StreamDispatcher from './StreamDispatcher';
@@ -11,7 +11,7 @@ import AIWhiteboardGeneratorModal from './AIWhiteboardGeneratorModal';
 import CoachToast from './CoachToast';
 import CoachNotebook from './CoachNotebook';
 import { MovableStudentFaceWidget } from './StudentStateWidget';
-import { getWebSocketUrl } from '../config/apiConfig';
+import { getWebSocketUrl, getApiBase } from '../config/apiConfig';
 
 const MeetingRoom = ({ session, onLeave }) => {
   const { roomCode, title, role } = session;
@@ -32,6 +32,14 @@ const MeetingRoom = ({ session, onLeave }) => {
   const [isSessionEnded, setIsSessionEnded] = useState(false);
 
   // Live Coach Alert Toasts & Notebook
+  const [nudgesEnabled, setNudgesEnabled] = useState(() => {
+    const saved = localStorage.getItem('whack_nudges_enabled');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const nudgesEnabledRef = useRef(nudgesEnabled);
+  useEffect(() => {
+    nudgesEnabledRef.current = nudgesEnabled;
+  }, [nudgesEnabled]);
   const [activeToast, setActiveToast] = useState(null);
   const [notebookEntries, setNotebookEntries] = useState([
     { id: '1', tier: 'T1', category: 'Pacing', text: 'Session active. Audio transcription and visual canvas ready.', timestamp: Date.now(), read: true }
@@ -118,7 +126,7 @@ const MeetingRoom = ({ session, onLeave }) => {
               timestamp: data.timestamp
             }]);
           } else if (data.type === 'live_coach_toast' && data.data) {
-            if (role === 'tutor') {
+            if (role === 'tutor' && nudgesEnabledRef.current) {
               setActiveToast(data.data);
               setNotebookEntries(prev => [
                 ...prev,
@@ -127,6 +135,7 @@ const MeetingRoom = ({ session, onLeave }) => {
                   tier: data.data.tier,
                   category: data.data.category || 'Confusion',
                   text: data.data.notebook_entry || data.data.toast_text,
+                  stepping_stone: data.data.stepping_stone,
                   suggestion: data.data.action_label,
                   timestamp: Date.now(),
                   read: false
@@ -144,10 +153,15 @@ const MeetingRoom = ({ session, onLeave }) => {
             }
             if (role === 'tutor' && rep.whiteboard_relevance) {
               const rel = rep.whiteboard_relevance;
-              const insightText = rel.acknowledgment || rel.pedagogical_insight;
+              const isMisconception = rel.problem_status === 'Answered with misconception' ||
+                (rep.areas_for_growth && /wrong|incorrect|misconception|error|mistake|struggl/i.test(rep.areas_for_growth) && rel.student_active_on_board);
+              const insightText = isMisconception
+                ? (rep.areas_for_growth || rel.acknowledgment || rel.pedagogical_insight)
+                : (rel.acknowledgment || rel.pedagogical_insight);
               if (insightText) {
                 setNotebookEntries(prev => {
-                  const entryMsg = `📋 ${insightText}`;
+                  const prefix = isMisconception ? '🔴 ' : '📋 ';
+                  const entryMsg = insightText.startsWith('🔴') || insightText.startsWith('📋') ? insightText : `${prefix}${insightText}`;
                   if (prev.length > 0 && prev[prev.length - 1].text === entryMsg) {
                     return prev;
                   }
@@ -155,10 +169,10 @@ const MeetingRoom = ({ session, onLeave }) => {
                     ...prev,
                     {
                       id: `rep_${Date.now()}`,
-                      tier: rel.problem_status === 'Answered with misconception' ? 'T3' : 'T1',
-                      category: rel.problem_status || 'Board Analysis',
+                      tier: isMisconception ? 'T3' : 'T1',
+                      category: isMisconception ? 'Wrong Answer / Misconception' : (rel.problem_status || 'Board Analysis'),
                       text: entryMsg,
-                      suggestion: rel.pupil_latest_work ? `Pupil work: ${rel.pupil_latest_work}` : undefined,
+                      suggestion: rel.pupil_latest_work && rel.pupil_latest_work !== 'None' ? `Pupil work: ${rel.pupil_latest_work}` : undefined,
                       timestamp: Date.now(),
                       read: false
                     }
@@ -236,6 +250,28 @@ const MeetingRoom = ({ session, onLeave }) => {
             positives: Array.isArray(rep.coach_notes.positives) ? rep.coach_notes.positives.slice(0, 2) : [],
             negatives: Array.isArray(rep.coach_notes.negatives) ? rep.coach_notes.negatives.slice(0, 2) : [],
             lastUpdated: Date.now()
+          });
+        }
+        if (rep?.live_nudge && nudgesEnabledRef.current) {
+          setActiveToast(rep.live_nudge);
+          setNotebookEntries(prev => {
+            const noteText = rep.live_nudge.notebook_entry || rep.live_nudge.toast_text;
+            if (prev.some(e => e.text === noteText && (Date.now() - e.timestamp) < 15000)) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: `entry_${Date.now()}`,
+                tier: rep.live_nudge.tier || 'T3',
+                category: rep.live_nudge.category || 'Confusion',
+                text: noteText,
+                stepping_stone: rep.live_nudge.stepping_stone,
+                suggestion: rep.live_nudge.action_label,
+                timestamp: Date.now(),
+                read: false
+              }
+            ];
           });
         }
       }
@@ -591,6 +627,38 @@ const MeetingRoom = ({ session, onLeave }) => {
             </button>
           )}
 
+          {/* Tutor Nudges Toggle (Enable/Disable Live Nudges) */}
+          {role === 'tutor' && (
+            <button
+              onClick={() => {
+                setNudgesEnabled(prev => {
+                  const next = !prev;
+                  localStorage.setItem('whack_nudges_enabled', String(next));
+                  if (!next) setActiveToast(null);
+                  return next;
+                });
+              }}
+              title={nudgesEnabled ? "Live Nudges: ON (Click to turn off alerts)" : "Live Nudges: OFF (Click to turn on alerts)"}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: '6px',
+                backgroundColor: nudgesEnabled ? '#1e293b' : 'rgba(239, 68, 68, 0.2)',
+                color: nudgesEnabled ? '#38bdf8' : '#f87171',
+                fontSize: '12px',
+                fontWeight: 600,
+                border: `1px solid ${nudgesEnabled ? '#334155' : 'rgba(239, 68, 68, 0.4)'}`,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease'
+              }}
+            >
+              {nudgesEnabled ? <Bell size={14} color="#38bdf8" /> : <BellOff size={14} color="#f87171" />}
+              <span>{nudgesEnabled ? 'Nudges: ON' : 'Nudges: OFF'}</span>
+            </button>
+          )}
+
           {/* AI Whiteboard Content Generator Button for Tutor */}
           {role === 'tutor' && (
             <button
@@ -702,14 +770,13 @@ const MeetingRoom = ({ session, onLeave }) => {
           onWhiteboardChange={handleWhiteboardChange}
         />
 
-        {/* Movable Tutor Student Face Mode Widget (starts top-right, draggable anywhere) */}
-        {role === 'tutor' && (
-          <MovableStudentFaceWidget
-            roomCode={roomCode}
-            socket={socket}
-            onOpenReport={() => setShowAICoach(true)}
-          />
-        )}
+        {/* Movable Student Face Emotion Widget (rendered for both Tutor and Student, draggable anywhere) */}
+        <MovableStudentFaceWidget
+          roomCode={roomCode}
+          socket={socket}
+          role={role}
+          onOpenReport={role === 'tutor' ? () => setShowAICoach(true) : undefined}
+        />
 
         {/* Top-Left: Picture-in-Picture Video Call (approx 1/9th total area) */}
         <div
@@ -886,6 +953,11 @@ const MeetingRoom = ({ session, onLeave }) => {
         whiteboardRef={whiteboardRef}
         isOpen={showAICoach}
         onClose={() => setShowAICoach(false)}
+        onLiveNudge={(nudge) => {
+          if (role === 'tutor' && nudgesEnabledRef.current) {
+            setActiveToast(nudge);
+          }
+        }}
       />
 
       {/* Are You Sure You Want to Exit Confirmation Modal */}

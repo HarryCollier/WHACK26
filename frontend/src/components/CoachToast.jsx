@@ -20,28 +20,26 @@ export default function CoachToast({
   useEffect(() => {
     if (!toast) return;
 
-    // T2 auto-dismisses after 4 seconds, but pauses whenever hovered
-    if (toast.tier === 'T2') {
-      if (isHovered) return; // Pause countdown while hovering
+    // Red alerts (T3 / confused student) auto-dismiss after 10s; yellow tips (T2) after 5s.
+    // Pauses while hovered.
+    if (isHovered) return; // Pause countdown while hovering
 
-      const startTime = Date.now();
-      const currentProgress = progress;
-      const totalDuration = 4000;
+    const isRedAlert = toast.tier === 'T3';
+    const totalDuration = isRedAlert ? 10000 : 5000; // 10s for red alerts, 5s for quick tips
+    const startTime = Date.now();
+    const currentProgress = progress;
 
-      const interval = setInterval(() => {
-        const elapsed = Date.now() - startTime;
-        const remainingPct = Math.max(0, currentProgress - (elapsed / totalDuration) * 100);
-        setProgress(remainingPct);
-        if (remainingPct <= 0) {
-          clearInterval(interval);
-          onDismiss();
-        }
-      }, 50);
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remainingPct = Math.max(0, currentProgress - (elapsed / totalDuration) * 100);
+      setProgress(remainingPct);
+      if (remainingPct <= 0) {
+        clearInterval(interval);
+        onDismiss();
+      }
+    }, 50);
 
-      return () => clearInterval(interval);
-    } else {
-      setProgress(100);
-    }
+    return () => clearInterval(interval);
   }, [toast, onDismiss, isHovered]);
 
   if (!toast) return null;
@@ -92,20 +90,18 @@ export default function CoachToast({
         userSelect: 'none'
       }}
     >
-      {/* T2 Progress bar countdown */}
-      {toast.tier === 'T2' && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            height: '3px',
-            width: `${progress}%`,
-            backgroundColor: isHovered ? '#38bdf8' : '#f59e0b',
-            transition: 'width 0.05s linear, background-color 0.2s ease'
-          }}
-        />
-      )}
+      {/* Progress bar countdown (5s auto-dismiss) */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          height: '3px',
+          width: `${progress}%`,
+          backgroundColor: isHovered ? '#38bdf8' : (isT3 ? '#ef4444' : '#f59e0b'),
+          transition: 'width 0.05s linear, background-color 0.2s ease'
+        }}
+      />
 
       {/* When Hovered: Expanded Header Row */}
       {isHovered ? (
@@ -291,80 +287,45 @@ export default function CoachToast({
         </div>
       </div>
 
-      {/* Actions (Drop on Board, Drop Stepping Stone, Snooze, Dismiss) */}
+      {/* Actions (Got it / Dismiss & Snooze) */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        justifyContent: isHovered ? 'flex-end' : 'flex-end',
+        justifyContent: 'flex-end',
         gap: '8px',
         flexShrink: 0,
         marginTop: isHovered ? '4px' : '0px'
       }}>
-        {/* Optional Secondary Action: Drop Stepping Stone directly onto canvas */}
-        {toast.stepping_stone && (
-          <button
-            onClick={() => onApplyExample({ type: 'stepping_stone_text', text: toast.stepping_stone })}
-            title="Write stepping stone question directly onto whiteboard"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              padding: isHovered ? '8px 14px' : '6px 12px',
-              borderRadius: '8px',
-              backgroundColor: '#0284c7',
-              color: '#ffffff',
-              fontSize: isHovered ? '12px' : '11px',
-              fontWeight: 700,
-              border: 'none',
-              cursor: 'pointer',
-              boxShadow: '0 2px 8px rgba(2, 132, 199, 0.35)',
-              transition: 'all 0.15s ease',
-              whiteSpace: 'nowrap'
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = '#0369a1';
-              e.currentTarget.style.transform = 'translateY(-1px)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = '#0284c7';
-              e.currentTarget.style.transform = 'translateY(0)';
-            }}
-          >
-            <span>📝 Drop Example</span>
-          </button>
-        )}
-
-        {/* Primary Action Button: Drop on Board */}
+        {/* Tutor Acknowledgment / Got it Button (Keeps Whiteboard Clean) */}
         <button
-          onClick={() => onApplyExample(toast.custom_diagram || toast.example_type || 'fraction_pizza', toast)}
-          title="Draw example directly on whiteboard canvas as a draggable card"
+          onClick={onDismiss}
+          title="Acknowledge coach advice"
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: '6px',
-            padding: isHovered ? '8px 16px' : '7px 14px',
+            padding: isHovered ? '7px 14px' : '6px 12px',
             borderRadius: '8px',
-            backgroundColor: '#059669',
+            backgroundColor: isT3 ? '#0284c7' : '#334155',
             color: '#ffffff',
-            fontSize: isHovered ? '13px' : '12px',
-            fontWeight: 700,
+            fontSize: isHovered ? '12px' : '11px',
+            fontWeight: 600,
             border: 'none',
             cursor: 'pointer',
-            boxShadow: '0 2px 10px rgba(5, 150, 105, 0.4)',
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.25)',
             transition: 'all 0.15s ease',
             whiteSpace: 'nowrap'
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = '#10b981';
+            e.currentTarget.style.backgroundColor = isT3 ? '#0369a1' : '#475569';
             e.currentTarget.style.transform = 'translateY(-1px)';
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = '#059669';
+            e.currentTarget.style.backgroundColor = isT3 ? '#0284c7' : '#334155';
             e.currentTarget.style.transform = 'translateY(0)';
           }}
         >
-          <span>{toast.action_label || '📐 Drop on Board'}</span>
-          <ArrowRight size={13} />
+          <span>✓ Got it</span>
         </button>
 
         {/* Snooze 2m */}
@@ -376,7 +337,7 @@ export default function CoachToast({
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              padding: isHovered ? '8px 12px' : '6px 10px',
+              padding: isHovered ? '7px 12px' : '6px 10px',
               borderRadius: '8px',
               backgroundColor: '#1e293b',
               color: '#94a3b8',

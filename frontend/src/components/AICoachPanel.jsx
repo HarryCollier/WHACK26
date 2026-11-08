@@ -518,6 +518,71 @@ export default function AICoachPanel({ roomCode, socket, role, whiteboardRef, is
               </div>
             </div>
 
+            {/* Student Right vs Wrong / Areas For Growth */}
+            {(report.what_student_did_well || report.areas_for_growth) && (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr',
+                gap: '10px'
+              }}>
+                {report.what_student_did_well && (
+                  <div style={{
+                    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                    borderRadius: '10px',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(16, 185, 129, 0.25)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px'
+                  }}>
+                    <div style={{
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      color: '#34d399',
+                      textTransform: 'uppercase',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}>
+                      <CheckCircle2 size={14} color="#34d399" />
+                      <span>What Student Is Doing Right</span>
+                    </div>
+                    <p style={{ fontSize: '12px', color: '#e2e8f0', margin: 0, lineHeight: 1.45 }}>
+                      {report.what_student_did_well}
+                    </p>
+                  </div>
+                )}
+
+                {report.areas_for_growth && (
+                  <div style={{
+                    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                    borderRadius: '10px',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(239, 68, 68, 0.25)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px'
+                  }}>
+                    <div style={{
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      color: '#f87171',
+                      textTransform: 'uppercase',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}>
+                      <AlertCircle size={14} color="#f87171" />
+                      <span>What Student Is Struggling With</span>
+                    </div>
+                    <p style={{ fontSize: '12px', color: '#fca5a5', margin: 0, lineHeight: 1.45 }}>
+                      {report.areas_for_growth}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Pacing Advice Note */}
             {report.pacing?.advice && (
               <div style={{

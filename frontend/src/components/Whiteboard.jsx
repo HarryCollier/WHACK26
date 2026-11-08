@@ -577,8 +577,16 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
     if (offCtx.translate) offCtx.translate(-cx, -cy);
 
     // Render all vector elements cleanly with role color coding
-    for (const el of elementsRef.current) {
-      const isStudent = el.role === 'student';
+    const allEls = elementsRef.current;
+    const hasExplicitStudent = allEls.some(e => e.role === 'student');
+    for (let idx = 0; idx < allEls.length; idx++) {
+      const el = allEls[idx];
+      // In solo testing mode (only 1 user), if the user generated/wrote a question and then drew freehand strokes or answers after it,
+      // highlight the trailing answer strokes in green (#059669) so the vision AI distinguishes question from answer attempt.
+      const isTrailingSoloAttempt = !hasExplicitStudent && !el.isCardBox && !el.cardId && idx > 0 && idx >= allEls.length - 4 && (
+        el.type === 'stroke' || (el.type === 'text' && !/[=?]/.test(el.text || ''))
+      );
+      const isStudent = el.role === 'student' || isTrailingSoloAttempt;
       const roleColor = isStudent ? '#059669' : '#0f172a';
       renderElementToCtx(offCtx, el, roleColor);
     }
@@ -602,7 +610,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           dataUrl: snap
         }));
       }
-    }, 600);
+    }, 350);
     if (onWhiteboardChange) {
       try { onWhiteboardChange(); } catch {}
     }
@@ -747,12 +755,64 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
 
   // Insert pedagogical nudge visual example / hint / solution in draggable card box format
   const insertVisualExample = (exampleType = 'fraction_pizza', toastData = null) => {
-    const normType = String(exampleType || '').toLowerCase();
+    const items = [];
     let cardTitle = '💡 Pedagogical Guidance';
     let cardSummary = '';
-    let boxW = 500;
+    let boxW = 520;
     let boxH = 320;
-    const items = [];
+
+    // 1. Direct AI Steps / Stepping Stone Card
+    if (
+      (exampleType && typeof exampleType === 'object' && (exampleType.type === 'stepping_stone_text' || exampleType.type === 'ai_steps')) ||
+      String(exampleType || '').toLowerCase() === 'ai_steps'
+    ) {
+      const stepsRaw = (exampleType && typeof exampleType === 'object' && exampleType.text)
+        ? exampleType.text
+        : (toastData?.stepping_stone || toastData?.toast_text || 'Break the problem into simpler steps:');
+
+      const rawLines = String(stepsRaw).split('\n').map(l => l.trim()).filter(Boolean);
+      cardTitle = '✨ AI Step-by-Step Guide';
+      cardSummary = rawLines[0] || 'Step-by-step breakdown';
+      boxW = 540;
+      boxH = Math.max(160, 95 + rawLines.length * 32);
+
+      items.push({
+        type: 'text',
+        text: '📋 Step-by-Step Breakdown:',
+        x: 30,
+        y: 78,
+        color: '#2563eb',
+        fontSize: 15,
+        fontWeight: 'bold'
+      });
+
+      let curY = 112;
+      rawLines.forEach((line) => {
+        items.push({
+          type: 'text',
+          text: line,
+          x: 30,
+          y: curY,
+          color: '#0f172a',
+          fontSize: 14,
+          fontWeight: 'bold',
+          maxWidth: 480
+        });
+        curY += 32;
+      });
+
+      return insertGeneratedContent({
+        title: cardTitle,
+        summary: cardSummary,
+        width: boxW,
+        height: boxH,
+        elements: items
+      });
+    }
+
+    const normType = (exampleType && typeof exampleType === 'object')
+      ? String(exampleType.kind || exampleType.type || '').toLowerCase()
+      : String(exampleType || '').toLowerCase();
 
     if (normType.includes('number_line')) {
       cardTitle = '📏 Number Line Model';
@@ -1006,7 +1066,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
       cardTitle = '∫ Calculus: Reverse Power Rule';
       cardSummary = '∫ xⁿ dx = (xⁿ⁺¹)/(n + 1) + C';
       boxW = 540;
-      boxH = 320;
+      boxH = 230;
 
       items.push({
         type: 'text',
@@ -1051,31 +1111,11 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         fontSize: 12
       });
 
-      // Pupil Working Area Box
-      items.push({
-        type: 'shape',
-        shapeType: 'rectangle',
-        start: { x: 30, y: 225 },
-        end: { x: 510, y: 285 },
-        color: '#059669',
-        fillColor: '#f0fdf4',
-        size: 1.5
-      });
-      items.push({
-        type: 'text',
-        text: '✏️ Try it: ∫ x dx = __________ + C',
-        x: 50,
-        y: 260,
-        color: '#059669',
-        fontSize: 14,
-        fontWeight: 'bold'
-      });
-
     } else if (normType.includes('algebra') || normType.includes('balance') || normType.includes('equation')) {
       cardTitle = '⚖️ Algebra: Equation Balance Scale';
       cardSummary = 'Perform the inverse operation on both sides';
       boxW = 540;
-      boxH = 310;
+      boxH = 205;
 
       items.push({
         type: 'text',
@@ -1112,33 +1152,13 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         fontWeight: 'bold'
       });
 
-      // Pupil Working Area Box
-      items.push({
-        type: 'shape',
-        shapeType: 'rectangle',
-        start: { x: 30, y: 210 },
-        end: { x: 510, y: 275 },
-        color: '#059669',
-        fillColor: '#f0fdf4',
-        size: 1.5
-      });
-      items.push({
-        type: 'text',
-        text: '✏️ Step-by-step working area: [Isolate x]',
-        x: 50,
-        y: 250,
-        color: '#059669',
-        fontSize: 14,
-        fontWeight: 'bold'
-      });
-
     } else {
       // General Nudge / Hint / Solution from toastData
       const category = toastData?.category ? (toastData.category.charAt(0).toUpperCase() + toastData.category.slice(1)) : 'Pedagogical Guidance';
       cardTitle = toastData?.title || `💡 Coach Hint: ${category}`;
       cardSummary = toastData?.toast_text || toastData?.notebook_entry || 'Pedagogical guidance';
       boxW = 520;
-      boxH = 300;
+      boxH = 210;
 
       const mainText = toastData?.toast_text || toastData?.notebook_entry || 'Suggested visual prompt / check-in question for pupil.';
       const steppingStone = toastData?.stepping_stone;
@@ -1199,26 +1219,6 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           maxWidth: 460
         });
       }
-
-      // Pupil Response / Working Area Box
-      items.push({
-        type: 'shape',
-        shapeType: 'rectangle',
-        start: { x: 30, y: 205 },
-        end: { x: 490, y: 265 },
-        color: '#059669',
-        fillColor: '#f0fdf4',
-        size: 1.5
-      });
-      items.push({
-        type: 'text',
-        text: '✏️ Pupil Working Area / Answer: [Write here]',
-        x: 45,
-        y: 242,
-        color: '#059669',
-        fontSize: 13,
-        fontWeight: 'bold'
-      });
     }
 
     return insertGeneratedContent({
@@ -1340,6 +1340,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
           if (wX !== null && wY !== null) {
             handleRemoteActivity(wX, wY, data.role || el.role);
           }
+          triggerSnapshotDispatch();
         } else if (data.type === 'whiteboard_sync_full') {
           // Late-joiner or full synchronization from server / peer
           if (Array.isArray(data.elements)) {
@@ -1349,10 +1350,12 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         } else if (data.type === 'whiteboard_delete_element') {
           elementsRef.current = elementsRef.current.filter(el => el.id !== data.elementId);
           redrawAll();
+          triggerSnapshotDispatch();
         } else if (data.type === 'whiteboard_delete_elements') {
           const ids = new Set(data.elementIds);
           elementsRef.current = elementsRef.current.filter(el => !ids.has(el.id));
           redrawAll();
+          triggerSnapshotDispatch();
         } else if (data.type === 'whiteboard_clear') {
           clearCanvasLocal();
         }
@@ -2811,14 +2814,14 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
             <button
               onClick={() => {
                 if (tool !== 'eraser' && tool !== 'stroke-eraser' && tool !== 'lasso-eraser') {
-                  setTool('eraser');
+                  setTool('stroke-eraser');
                 } else {
                   setShowEraserMenu(prev => !prev);
                   setShowMathMenu(false);
                   setShowRgbPicker(false);
                 }
               }}
-              title="Eraser"
+              title="Eraser (Stroke)"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -2830,9 +2833,9 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
                 cursor: 'pointer',
                 borderRadius: '8px 0 0 8px'
               }}>
-              {tool === 'stroke-eraser' ? <Scissors size={16} /> : tool === 'lasso-eraser' ? <Lasso size={16} /> : <Eraser size={16} />}
+              {tool === 'eraser' ? <Eraser size={16} /> : tool === 'lasso-eraser' ? <Lasso size={16} /> : <Scissors size={16} />}
               <span style={{ fontSize: '12px', fontWeight: 500 }}>
-                {tool === 'stroke-eraser' ? 'Stroke' : tool === 'lasso-eraser' ? 'Lasso' : 'Eraser'}
+                {tool === 'eraser' ? 'Brush' : tool === 'lasso-eraser' ? 'Lasso' : 'Stroke'}
               </span>
             </button>
             <button

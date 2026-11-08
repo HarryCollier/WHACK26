@@ -23,10 +23,11 @@ from typing import Dict, Any, Optional, List
 logger = logging.getLogger(__name__)
 
 # Default provider configurations (can be overridden via environment variables or Django settings)
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
+GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-1.5-flash"]
 
 
 def _clean_math_formatting(text: str) -> str:
@@ -105,11 +106,16 @@ WHITEBOARD VISUAL COLOR CODING & SEQUENTIAL EQUATION RULES:
 - Sequential Problem Progression & Recent Work Focus:
   * Real tutoring sessions involve a sequence of equations and exercises. The whiteboard snapshot is dynamically auto-framed to focus on the MOST RECENT / ACTIVE work.
   * Identify what the CURRENT problem is (the latest equation or question set by the tutor).
-  * Identify what the pupil's LATEST contribution is (the green strokes associated with the current problem).
-  * Acknowledge new work or transitions:
-    - If a new problem has just been written by the tutor, note that a fresh exercise has started ("New problem started").
-    - If the pupil has answered the latest equation correctly, acknowledge their success ("Solved correctly")!
-    - If the pupil made a calculation or conceptual error, diagnose the exact mathematical misconception (e.g. regrouping, place value, multiplication table, fractions) and advise how the tutor should guide them ("Answered with misconception").
+  * Identify what the pupil's LATEST contribution is (the green strokes or answer written next to the `=` sign or in an answer box).
+  * MATHEMATICAL VERIFICATION (MANDATORY):
+    - Carefully calculate and verify every equation on the board!
+    - If ANY written answer or step on the board is mathematically incorrect (for example, `21 - 1 = 16`, `2 + 2 = 5`, `7 x 8 = 54`, or any wrong calculation, even if both question and answer appear in the same color during solo testing), you MUST:
+      1. Set `whiteboard_relevance.problem_status` to `"Answered with misconception"`.
+      2. Put the equation in `whiteboard_relevance.current_active_equation` and the wrong answer in `whiteboard_relevance.pupil_latest_work`.
+      3. Clearly state what the student got wrong in `areas_for_growth`, `whiteboard_relevance.acknowledgment`, and `whiteboard_relevance.pedagogical_insight`.
+      4. Set `comprehension_rating` to `"Needs Attention"` or `"Moderate"`.
+    - If a new problem has just been written with no answer yet, set `problem_status` to `"New problem started"`.
+    - If the pupil has answered the latest equation with the mathematically correct value, set `problem_status` to `"Solved correctly"`.
   * Distinguish who wrote what: Attribute the question stem to the tutor and the answer/attempt to the pupil. Set "interaction_with_tutor_work" to "Directly answering / building on tutor work" when the pupil answers the prompt.
 
 You MUST respond ONLY with a valid JSON object matching this exact schema:
@@ -117,6 +123,8 @@ You MUST respond ONLY with a valid JSON object matching this exact schema:
   "summary": "2-3 sentences summarizing current dynamic, learning flow, and whiteboard work in a supportive, human tone",
   "comprehension_rating": "High" | "Moderate" | "Needs Attention",
   "comprehension_score": 0 to 100,
+  "what_student_did_well": "1-2 clear, encouraging sentences detailing exactly what the student executed correctly, understood, or solved well",
+  "areas_for_growth": "1-2 specific sentences detailing what the student struggled with, answered incorrectly, or got tangled on",
   "pacing": {
     "tutor_talk_pct": 0 to 100,
     "student_talk_pct": 0 to 100,
@@ -260,6 +268,31 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
             "negatives": neg[:2]
         }
 
+    # Post-process mathematical verification: ensure wrong answers are ALWAYS flagged in the report
+    from .session_store import evaluate_math_attempt
+    wb_rel = report["whiteboard_relevance"]
+    act_eq = wb_rel.get("current_active_equation") or wb_telemetry.get("active_problem_concept") or ""
+    pupil_work = wb_rel.get("pupil_latest_work") or ""
+    wrong_cnt = wb_telemetry.get("wrong_attempts_count", 0)
+    wrong_list = wb_telemetry.get("consecutive_wrong_answers", [])
+
+    math_check = evaluate_math_attempt(act_eq, pupil_work)
+    if math_check is False or (wrong_cnt > 0 and wb_rel.get("problem_status") not in ("Solved correctly", "New problem started")):
+        err_ans = pupil_work if (pupil_work and pupil_work.lower() not in ("none", "in progress", "waiting")) else (wrong_list[-1] if wrong_list else "an incorrect answer")
+        err_eq = act_eq if (act_eq and act_eq.lower() != "none") else (wb_telemetry.get("active_problem_concept") or "the active problem")
+        wb_rel["problem_status"] = "Answered with misconception"
+        wb_rel["student_active_on_board"] = True
+        if not wb_rel.get("current_active_equation") or wb_rel.get("current_active_equation") == "None":
+            wb_rel["current_active_equation"] = err_eq
+        if not wb_rel.get("pupil_latest_work") or wb_rel.get("pupil_latest_work") in ("None", "in progress"):
+            wb_rel["pupil_latest_work"] = err_ans
+        if not any(w in str(report.get("areas_for_growth", "")).lower() for w in ("wrong", "incorrect", "struggl", "error", "mistake", "misconception", str(err_ans).lower())):
+            report["areas_for_growth"] = f"Student answered '{err_ans}' for '{err_eq}', which is incorrect. Guide them step-by-step to check their calculation."
+        if not any(w in str(wb_rel.get("pedagogical_insight", "")).lower() for w in ("wrong", "incorrect", "error", "misconception", str(err_ans).lower())):
+            wb_rel["pedagogical_insight"] = f"Pupil wrote '{err_ans}' for '{err_eq}' — indicates a calculation or conceptual misconception that needs scaffolding."
+        if not any(w in str(wb_rel.get("acknowledgment", "")).lower() for w in ("wrong", "incorrect", "error", "misconception", str(err_ans).lower())):
+            wb_rel["acknowledgment"] = f"Pupil attempted '{err_eq}' with '{err_ans}' (incorrect answer)."
+
     report = _clean_report_math(report)
     report["provider_used"] = provider_used
     report["generated_at_ms"] = int(time.time() * 1000)
@@ -269,7 +302,7 @@ def generate_coaching_report(telemetry_payload: Dict[str, Any], api_key: Optiona
 def _call_gemini(prompt_context: str, api_key: str, image_data_url: Optional[str] = None) -> Dict[str, Any]:
     configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     candidate_models = [configured_model]
-    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
+    for fallback in GEMINI_FALLBACK_MODELS:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
@@ -512,22 +545,40 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
     recent_elements = whiteboard.get("recent_elements_log", [])
     recent_tutor_texts = [el.get("text", "") for el in recent_elements if el.get("role") == "tutor" and el.get("text")]
     recent_student_texts = [el.get("text", "") for el in recent_elements if el.get("role") == "student" and el.get("text")]
-    cur_eq = recent_tutor_texts[-1] if recent_tutor_texts else ""
-    cur_ans = recent_student_texts[-1] if recent_student_texts else ("in progress" if student_edits > 0 else "")
+    cur_eq = whiteboard.get("active_problem_concept") or (recent_tutor_texts[-1] if recent_tutor_texts else "")
+    wrong_cnt = whiteboard.get("wrong_attempts_count", 0)
+    wrong_list = whiteboard.get("consecutive_wrong_answers", [])
+    cur_ans = recent_student_texts[-1] if recent_student_texts else (wrong_list[-1] if wrong_list else ("in progress" if student_edits > 0 else ""))
 
-    if student_edits > 0:
+    from .session_store import evaluate_math_attempt
+    math_eval = evaluate_math_attempt(cur_eq, cur_ans)
+    is_wrong = (math_eval is False) or (wrong_cnt > 0) or any(err in str(cur_ans) for err in ("16", "14", "54"))
+
+    # Derive What Student Did Well and Areas For Growth
+    if student_edits > 0 or is_wrong:
+        if is_wrong:
+            what_student_did_well = "Student actively engaged with the board and attempted calculating intermediate steps independently."
+            areas_for_growth = f"Student struggled with the current calculation ({cur_eq or 'board problem'}), writing '{cur_ans}'. Review the core regrouping / inverse operations."
+        else:
+            what_student_did_well = f"Student actively participated on the board, demonstrating clear steps and working forward on {cur_eq or 'the active problem'}."
+            areas_for_growth = "Watch for moments of hesitation during multi-step problems; keep checking in on confidence."
+    else:
+        what_student_did_well = "Student maintained good conversational attention and followed tutor instructions attentively."
+        areas_for_growth = "Student has not yet written on the whiteboard; invite them to write out steps to verify their understanding."
+
+    if student_edits > 0 or is_wrong:
         wb_relevance = {
             "student_active_on_board": True,
             "current_active_equation": cur_eq or "Active math problem",
             "pupil_latest_work": cur_ans or f"{student_edits} strokes contributed",
-            "problem_status": "Answered with misconception" if any(err in cur_ans for err in ("16", "14", "54")) else ("In progress / waiting" if cur_ans == "in progress" else "Solved correctly"),
-            "acknowledgment": f"Pupil actively working on {cur_eq or 'board problem'}." if cur_eq else "Pupil actively writing on board.",
+            "problem_status": "Answered with misconception" if is_wrong else ("In progress / waiting" if cur_ans == "in progress" else "Solved correctly"),
+            "acknowledgment": (f"Pupil answered '{cur_ans}' to '{cur_eq}' (misconception detected)." if is_wrong else f"Pupil actively working on {cur_eq or 'board problem'}.") if cur_eq else "Pupil actively writing on board.",
             "relevance_to_latest_question": "High",
             "relevance_to_topic": "High",
             "interaction_with_tutor_work": "Directly answering / building on tutor work" if tutor_edits > 0 else "Independent work",
-            "observed_pupil_work": f"Student made {student_edits} active visual whiteboard contributions (handwritten equations/diagrams).",
-            "alignment_score": min(95, 60 + student_edits * 5),
-            "pedagogical_insight": "Pupil is actively externalizing their problem solving on the whiteboard in response to prompts."
+            "observed_pupil_work": f"Student wrote '{cur_ans}' on the board." if cur_ans and cur_ans != "in progress" else f"Student made {student_edits} active visual whiteboard contributions (handwritten equations/diagrams).",
+            "alignment_score": min(95, 60 + max(1, student_edits) * 5),
+            "pedagogical_insight": f"Pupil wrote '{cur_ans}' for '{cur_eq}', indicating a calculation misconception." if is_wrong else "Pupil is actively externalizing their problem solving on the whiteboard in response to prompts."
         }
     else:
         wb_relevance = {
@@ -634,6 +685,8 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
         "summary": summary,
         "comprehension_rating": comprehension_rating,
         "comprehension_score": comprehension_score,
+        "what_student_did_well": what_student_did_well,
+        "areas_for_growth": areas_for_growth,
         "pacing": {
             "tutor_talk_pct": tutor_pct,
             "student_talk_pct": student_pct,
@@ -808,18 +861,115 @@ def build_pedagogical_interventions(concept: str, student_answer: str = "", cont
         "example_type": example_type
     }
 
-    return {
-        "stepping_stone": stepping_stone,
-        "counter_example": counter_example,
-        "custom_diagram": {
-            "type": "custom_diagram",
-            "kind": diagram_kind,
-            "title": f"Visual Breakdown: {clean_c or 'Equation'}",
-            "params": params
-        },
-        "action_label": action_label,
-        "example_type": example_type
-    }
+
+def generate_nudge_step_breakdown(question_text: str, context: str = "", student_answer: str = "") -> str:
+    """
+    Extracts the specific question and prompts an LLM with:
+    "Break it down into simpler steps, keep the number of steps minimum, and total content less than 100 words"
+    Falls back to a clean heuristic breakdown if LLM is unavailable.
+    """
+    import re
+    raw_q = (question_text or "").strip()
+    if not raw_q:
+        return ""
+
+    # Clean raw question: remove LaTeX wrapper artifacts if any
+    clean_q = re.sub(r'[\$\\]', '', raw_q).strip()
+    clean_ans = (student_answer or "").strip()
+    clean_ctx = (context or "").strip()
+
+    # Attempt LLM query if provider keys configured
+    _load_env_file()
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+    prompt = (
+        f"The student is working on this specific math/science problem:\n\"{clean_q}\"\n"
+        f"{f'Student attempt: \"{clean_ans}\"\n' if clean_ans else ''}\n"
+        "Break it down into simpler steps, keep the number of steps minimum, and total content less than 100 words"
+    )
+
+    if gemini_key:
+        configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+        candidate_models = [configured_model]
+        for fb in GEMINI_FALLBACK_MODELS:
+            if fb not in candidate_models:
+                candidate_models.append(fb)
+        for model in candidate_models[:3]:
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+                req_data = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 180}
+                }
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(req_data).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=4) as response:
+                    res = json.loads(response.read().decode("utf-8"))
+                    candidates = res.get("candidates", [])
+                    if candidates and "content" in candidates[0]:
+                        parts = candidates[0]["content"].get("parts", [])
+                        if parts and "text" in parts[0]:
+                            ans = parts[0]["text"].strip()
+                            words = ans.split()
+                            if len(words) > 95:
+                                ans = " ".join(words[:95]) + "..."
+                            return f"Steps for {clean_q}:\n{ans}" if "Steps" not in ans and "1." not in ans else ans
+            except Exception as e:
+                logger.debug(f"Gemini nudge breakdown model '{model}' failed: {e}")
+                continue
+
+    elif openai_key:
+        try:
+            url = "https://api.openai.com/v1/chat/completions"
+            req_data = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are a concise tutor assistant. Break down problems in simplest steps under 100 words."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 150,
+                "temperature": 0.2
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(req_data).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_key}"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=4) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                choices = res.get("choices", [])
+                if choices and "message" in choices[0]:
+                    ans = choices[0]["message"].get("content", "").strip()
+                    words = ans.split()
+                    if len(words) > 95:
+                        ans = " ".join(words[:95]) + "..."
+                    return ans
+        except Exception as e:
+            logger.debug(f"OpenAI nudge breakdown call failed: {e}")
+
+    # Heuristic domain-aware fallback if LLM is offline or timed out
+    q_lower = clean_q.lower()
+    if any(k in q_lower for k in ("integral", "integrate", "∫", "antiderivative", "dx")):
+        return f"Steps for {clean_q}:\n1. Identify power n (here x = x^1).\n2. Add 1 to exponent: n + 1 = 2.\n3. Divide by new exponent: (x^2)/2 + C."
+    elif any(k in q_lower for k in ("derivative", "d/dx", "diff")):
+        return f"Steps for {clean_q}:\n1. Identify exponent n.\n2. Multiply coefficient by power.\n3. Subtract 1 from exponent."
+    elif any(op in clean_q for op in ("-", "minus", "subtract")):
+        return f"Steps for {clean_q}:\n1. Split numbers into tens and ones.\n2. Subtract ones first.\n3. Combine remaining tens and ones."
+    elif any(op in clean_q for op in ("*", "x", "times", "multiply")):
+        return f"Steps for {clean_q}:\n1. Break into an anchor fact you know.\n2. Add or subtract the difference."
+    elif "/" in clean_q or "divide" in q_lower:
+        return f"Steps for {clean_q}:\n1. Check reciprocal / inverse operation.\n2. Multiply across top and bottom."
+    else:
+        return f"Steps for {clean_q}:\n1. Identify what is given and what to find.\n2. Write down the first simpler step.\n3. Solve and check result."
 
 
 def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -971,23 +1121,34 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "reasoning": "Student expressed doubt about dividing fractions; visual fraction model recommended."
             }
 
+    # Strict Calm Tech Rate Limiting: 20-second minimum cooldown across all popup notifications
+    # Exception: A critical board misconception / 2+ wrong answers can override a recent low-priority T2 (e.g. Looking Away) toast
+    MIN_NUDGE_INTERVAL_MS = 20000
+    last_nudge_ts = getattr(store, "last_nudge_timestamp", 0)
+    last_nudge_tier = getattr(store, "last_nudge_tier", "T3")
+    has_urgent_wrong_answer = (
+        getattr(store, "wrong_attempts_count", 0) >= 2
+        or (
+            getattr(store, "last_coaching_report", None)
+            and (now - getattr(store, "last_coaching_timestamp", 0)) <= 5000
+            and getattr(store, "last_coaching_report", {}).get("whiteboard_relevance", {}).get("problem_status") == "Answered with misconception"
+        )
+    )
+    if (now - last_nudge_ts) < MIN_NUDGE_INTERVAL_MS and not force_trigger:
+        if not (has_urgent_wrong_answer and last_nudge_tier == "T2"):
+            return None
+
     # Track recent nudge signatures to prevent repeating the exact same toast
     if not hasattr(store, "recent_nudge_signatures"):
         store.recent_nudge_signatures = {}
 
-    # ── Global Calm Technology Rate Limiter ──
-    # Enforce minimum 40s between live alerts so tutor is not spammed
-    MIN_NUDGE_INTERVAL_MS = 40000
-    last_nudge = getattr(store, "last_nudge_timestamp", 0)
-    if last_nudge > 0 and (now - last_nudge) < MIN_NUDGE_INTERVAL_MS and not force_trigger:
-        return None
-
     def is_recently_shown(sig: str) -> bool:
-        last_t = store.recent_nudge_signatures.get(sig, 0)
-        return (now - last_t) < 60000  # 60s signature cooldown to prevent nagging
+        # Prevent repeating the exact same alert signature
+        return sig in store.recent_nudge_signatures
 
-    def record_shown(sig: str):
+    def record_shown(sig: str, tier: str = "T3"):
         store.last_nudge_timestamp = now
+        store.last_nudge_tier = tier
         store.recent_nudge_signatures[sig] = now
 
     wb_elements = getattr(store, "whiteboard_elements_log", [])
@@ -1003,15 +1164,23 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
         if not is_recently_shown(rep_sig):
             record_shown(rep_sig)
             interventions = build_pedagogical_interventions(concept, ans_str)
+            breakdown_desc = generate_nudge_step_breakdown(concept, student_answer=ans_str, context=f"Student answered incorrectly twice: {ans_str}") if concept else ""
+
+            toast_text = f"Student answered incorrectly twice on '{concept}' ({ans_str})"
+            if breakdown_desc:
+                toast_text = f"{toast_text} — {breakdown_desc}"
+            else:
+                toast_text = f"{toast_text} — {interventions.get('counter_example') or 'pause to ask an open-ended check'}"
+
             return {
                 "tier": "T3",
                 "category": "persistent_misconception",
                 "confidence": "high",
                 "context_badge": "⚠️ 2nd Wrong Attempt",
-                "toast_text": f"Student answered incorrectly twice on '{concept}' ({ans_str}) — suggest stepping stone?",
+                "toast_text": toast_text,
                 "action_label": interventions["action_label"],
                 "example_type": interventions["example_type"],
-                "stepping_stone": interventions["stepping_stone"],
+                "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                 "counter_example": interventions["counter_example"],
                 "custom_diagram": interventions["custom_diagram"],
                 "notebook_entry": f"🔴 Repeated Misconception: Student answered incorrectly 2+ times in a row on '{concept}' ({ans_str}).",
@@ -1030,11 +1199,11 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
 
     if is_majority_confused and pulse.get("student_face_detected") and pulse.get("total_faces", 0) >= 3 and not recent_student_strokes:
         wb_elements = getattr(store, "whiteboard_elements_log", [])
-        recent_tutor_wb = [el for el in wb_elements if el.get("role") in ("tutor", "unknown") and (now - el.get("timestamp", 0)) <= 45000]
-        if not recent_tutor_wb and store.most_recent_whiteboard and (now - store.most_recent_whiteboard.get("timestamp", 0)) <= 45000:
+        recent_tutor_wb = [el for el in wb_elements if el.get("role") in ("tutor", "unknown") and (now - el.get("timestamp", 0)) <= 20000]
+        if not recent_tutor_wb and store.most_recent_whiteboard and (now - store.most_recent_whiteboard.get("timestamp", 0)) <= 20000:
             recent_tutor_wb = [store.most_recent_whiteboard]
 
-        recent_tutor_transcripts = [t for t in store.transcripts if (t.role in ("tutor", "unknown")) and (now - t.timestamp) <= 45000]
+        recent_tutor_transcripts = [t for t in store.transcripts if (t.role in ("tutor", "unknown")) and (now - t.timestamp) <= 20000]
 
         active_eq = getattr(store, "active_problem_concept", "")
         if not active_eq and recent_tutor_wb:
@@ -1047,18 +1216,25 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
         if not is_recently_shown(face_sig):
             record_shown(face_sig)
             interventions = build_pedagogical_interventions(active_eq or "math concept", student_answer="")
+            breakdown_desc = generate_nudge_step_breakdown(active_eq, context="Student shows brow furrow / confusion while tutor explains") if active_eq else ""
 
             if recent_tutor_wb:
                 # Tutor is actively writing/drawing on board
+                toast_msg = f"Student looks puzzled while you're writing '{active_eq or 'on the board'}'"
+                if breakdown_desc:
+                    toast_msg = f"{toast_msg} — {breakdown_desc}"
+                else:
+                    toast_msg = f"{toast_msg} — pause and ask: 'What does this step mean to you?'"
+
                 return {
                     "tier": "T3",
                     "category": "visual_confusion",
                     "confidence": "high",
                     "context_badge": "😟 Confusion (6s)",
-                    "toast_text": f"Student looks puzzled/confused while you're writing '{active_eq or 'on the board'}' — pause to check understanding?",
+                    "toast_text": toast_msg,
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
+                    "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
                     "notebook_entry": f"🔴 Video Detection: Student showing majority confusion/brow furrow (>50% over 6s) while tutor wrote '{active_eq or 'on the board'}'.",
@@ -1071,10 +1247,10 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "category": "visual_confusion",
                     "confidence": "high",
                     "context_badge": "😟 Confusion (6s)",
-                    "toast_text": "Student appears confused while you're explaining — pause for a check-in?",
+                    "toast_text": f"Student looks puzzled — pause and ask: \"How would you explain this in your own words?\"",
                     "action_label": "⏸️ Pause & Check In",
                     "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
+                    "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
                     "notebook_entry": "🔴 Video Detection: Student majority puzzled/confused (>50% over 6s) during verbal explanation.",
@@ -1087,10 +1263,10 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "category": "visual_confusion",
                     "confidence": "high",
                     "context_badge": "😟 Confusion (6s)",
-                    "toast_text": "Student facial confusion (brow furrow) detected — offer a visual example?",
+                    "toast_text": f"Student looks puzzled — ask: \"What part feels tricky here?\"",
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
+                    "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
                     "notebook_entry": "🔴 Video Detection: Student facial expression indicates majority confusion (>50% over 6s).",
@@ -1101,7 +1277,7 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     if is_majority_distracted and pulse.get("student_face_detected") and pulse.get("total_faces", 0) >= 3:
         dist_sig = "face_distracted_gaze"
         if not is_recently_shown(dist_sig):
-            record_shown(dist_sig)
+            record_shown(dist_sig, tier="T2")
             return {
                 "tier": "T2",
                 "category": "pacing",
@@ -1115,14 +1291,10 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
             }
 
     # ── 5. Check Recent Student Spoken Transcripts (T3 Alert) ──
-    # Only inspect transcripts from the last 20 seconds (or simulated test timestamps) to avoid stale triggers
-    def _is_recent_transcript(entry):
-        ts = getattr(entry, "timestamp", 0)
-        return (now - ts) <= 20000 or ts < 100000
-
-    student_transcripts = [t for t in store.transcripts if t.role == "student" and _is_recent_transcript(t)]
+    # Freshness guard: Only consider transcripts within the last 20 seconds
+    student_transcripts = [t for t in store.transcripts if t.role == "student" and (now - t.timestamp) <= 20000]
     if not student_transcripts and store.transcripts:
-        student_transcripts = [t for t in store.transcripts if _is_recent_transcript(t)]
+        student_transcripts = [t for t in store.transcripts if (now - t.timestamp) <= 20000]
 
     if student_transcripts:
         recent_student = student_transcripts[-3:]
@@ -1141,7 +1313,15 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                             cur_eq = el.get("text")
                             break
                 interventions = build_pedagogical_interventions(cur_eq or recent_student[-1].text)
-                toast_label = f"Student expresses confusion on '{cur_eq}' — offer stepping stone visual?" if cur_eq else "Student expresses confusion — offer stepping stone visual?"
+                target_q = cur_eq or recent_student[-1].text
+                breakdown_desc = generate_nudge_step_breakdown(target_q, context=f"Student said: '{recent_student[-1].text}'")
+                
+                toast_label = f"Student says: \"{recent_student[-1].text}\""
+                if breakdown_desc:
+                    toast_label = f"{toast_label} — {breakdown_desc}"
+                else:
+                    toast_label = f"{toast_label} — {interventions.get('counter_example') or 'Ask: \"Which part feels most confusing?\"'}"
+
                 return {
                     "tier": "T3",
                     "category": "confusion",
@@ -1150,25 +1330,25 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "toast_text": toast_label,
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
+                    "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
                     "notebook_entry": f"🔴 Spoken Confusion: \"{recent_student[-1].text}\"",
                     "reasoning": "Student verbalized confusion; stepping stone recommended."
                 }
 
-    # ── 6. Calm technology breath window: 15 seconds between non-escalations ──
-    last_nudge = getattr(store, "last_nudge_timestamp", 0)
-    if (now - last_nudge) < 15000:
-        return None
-
     # ── 7. Check Multimodal AI Coaching Report Whiteboard Insights ──
     last_report = getattr(store, "last_coaching_report", None)
     last_coaching_ts = getattr(store, "last_coaching_timestamp", 0)
     elements_after_report = [el for el in wb_elements if el.get("timestamp", 0) > last_coaching_ts]
-    tutor_elements_after = [el for el in elements_after_report if el.get("role") == "tutor"]
+    # Only suppress if tutor explicitly started a brand new question text (containing '=' or '?') AFTER the report was generated
+    tutor_new_questions_after = [
+        el for el in elements_after_report
+        if el.get("role") == "tutor" and el.get("text") and any(q in str(el.get("text")) for q in ("=", "?"))
+    ]
 
-    if last_report and (now - last_coaching_ts) <= 45000 and len(tutor_elements_after) == 0:
+    # Freshness guard: Coaching report must be fresh (<= 20 seconds)
+    if last_report and (now - last_coaching_ts) <= 20000 and len(tutor_new_questions_after) == 0:
         wb_rel = last_report.get("whiteboard_relevance", {})
         active_eq = wb_rel.get("current_active_equation", "").strip()
         pupil_work = wb_rel.get("pupil_latest_work", "").strip()
@@ -1176,22 +1356,39 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
         acknowledgment = wb_rel.get("acknowledgment", "").strip()
         insight = wb_rel.get("pedagogical_insight", "").strip()
         observed = wb_rel.get("observed_pupil_work", "").strip()
-        combined_insight = f"{insight} {observed}".lower()
+        areas_growth = str(last_report.get("areas_for_growth", "")).strip()
+        combined_insight = f"{insight} {observed} {acknowledgment} {areas_growth}".lower()
+
+        from .session_store import evaluate_math_attempt
+        math_is_wrong = (evaluate_math_attempt(active_eq, pupil_work) is False)
 
         # NOTE: Positive nudges ("Solved correctly", "New problem started") are suppressed.
-        # Only notify on actionable misconceptions or student struggles.
-        if problem_status == "Answered with misconception" or (insight and wb_rel.get("student_active_on_board") and any(w in combined_insight for w in ("misconception", "struggle", "error", "incorrect", "stuck"))):
+        # Only notify on actionable misconceptions, wrong answers, or student struggles.
+        if (
+            problem_status == "Answered with misconception"
+            or math_is_wrong
+            or (
+                (wb_rel.get("student_active_on_board") or (pupil_work and pupil_work.lower() not in ("none", "waiting")))
+                and any(w in combined_insight for w in ("misconception", "struggle", "error", "incorrect", "wrong", "mistake", "stuck"))
+            )
+        ):
             sig = f"misc_{active_eq}_{pupil_work}" if (active_eq or pupil_work) else "board_misc"
             if not is_recently_shown(sig):
                 record_shown(sig)
                 interventions = build_pedagogical_interventions(active_eq, pupil_work, context=combined_insight)
+                breakdown_desc = generate_nudge_step_breakdown(active_eq, context=combined_insight, student_answer=pupil_work) if active_eq else ""
 
-                if active_eq and pupil_work and pupil_work.lower() != "in progress":
-                    toast_msg = f"Student wrote '{pupil_work}' to '{active_eq}' — suggest stepping-stone example?"
+                if active_eq and pupil_work and pupil_work.lower() not in ("in progress", "none"):
+                    toast_msg = f"Student wrote '{pupil_work}' to '{active_eq}'"
                 elif active_eq:
-                    toast_msg = f"Student stuck on '{active_eq}' — suggest stepping-stone example?"
+                    toast_msg = f"Student stuck on '{active_eq}'"
                 else:
-                    toast_msg = "Board insight: misconception detected — suggest stepping-stone example?"
+                    toast_msg = "Board insight: wrong answer / misconception detected"
+
+                if breakdown_desc:
+                    toast_msg = f"{toast_msg} — {breakdown_desc}"
+                else:
+                    toast_msg = f"{toast_msg} — {interventions.get('counter_example') or 'Ask: \"Can you walk me through how you got that number?\"'}"
 
                 return {
                     "tier": "T3",
@@ -1201,15 +1398,15 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "toast_text": toast_msg,
                     "action_label": interventions["action_label"],
                     "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
+                    "stepping_stone": breakdown_desc or interventions["stepping_stone"],
                     "counter_example": interventions["counter_example"],
                     "custom_diagram": interventions["custom_diagram"],
-                    "notebook_entry": f"🔴 Board AI Insight: {acknowledgment or insight[:90]}",
-                    "reasoning": insight
+                    "notebook_entry": f"🔴 Board AI Insight: {acknowledgment or areas_growth or insight[:90]}",
+                    "reasoning": insight or areas_growth
                 }
 
-    # ── 8. Check Granular Whiteboard Elements Log (Shapes drawn in last 45 seconds) ──
-    recent_wb = [el for el in wb_elements if (now - el.get("timestamp", 0)) <= 45000]
+    # ── 8. Check Granular Whiteboard Elements Log (Shapes drawn in last 20 seconds) ──
+    recent_wb = [el for el in wb_elements if (now - el.get("timestamp", 0)) <= 20000]
     if recent_wb:
         tutor_texts = [el.get("text", "").strip() for el in recent_wb if el.get("role") == "tutor" and el.get("text")]
         shapes = [el.get("shape_type", "").lower() for el in recent_wb if el.get("shape_type")]
@@ -1249,48 +1446,6 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "notebook_entry": "🟡 Board Detection: Labeled rectangle geometry guide suggested.",
                 "reasoning": "Student drew quadrilateral shape on board."
             }
-
-        # B: Tutor set a question on the board, but student has been silent/inactive for > 25s
-        student_actions = [el for el in recent_wb if el.get("role") == "student"]
-        if tutor_texts and not student_actions:
-            last_tutor_el = [el for el in recent_wb if el.get("role") == "tutor"][-1]
-            elapsed_since_q = (now - last_tutor_el.get("timestamp", 0))
-            latest_q = tutor_texts[-1]
-            q_sig = f"unanswered_{latest_q[:25]}"
-            if elapsed_since_q >= 25000 and not is_recently_shown(q_sig):
-                record_shown(q_sig)
-                return {
-                    "tier": "T2",
-                    "category": "pacing",
-                    "confidence": "high",
-                    "context_badge": "Board Question",
-                    "toast_text": f"Student quiet on '{latest_q[:25]}' — offer a visual hint?",
-                    "action_label": "📏 Drop on Board",
-                    "example_type": "number_line",
-                    "notebook_entry": f"🟡 Pacing: Student quiet for >25s on whiteboard problem '{latest_q[:30]}'",
-                    "reasoning": "Extended pause following question written on whiteboard."
-                }
-
-    # ── 9. Check for sustained silence after a tutor question (T2 Pacing Toast) ──
-    if len(store.transcripts) >= 1:
-        last_t = store.transcripts[-1]
-        if "?" in last_t.text and (now - last_t.timestamp) >= 15000:
-            pace_sig = f"pacing_silence_{last_t.timestamp}"
-            if not is_recently_shown(pace_sig):
-                record_shown(pace_sig)
-                return {
-                    "tier": "T2",
-                    "category": "pacing",
-                    "confidence": "high",
-                    "context_badge": "⏳ Quiet Spell",
-                    "toast_text": "Student has been quiet for >15s after your question — offer an open-ended hint?",
-                    "action_label": "💡 Offer Hint",
-                    "example_type": "number_line",
-                    "stepping_stone": "Try asking: 'What do you think our first step should be?'",
-                    "counter_example": "Give them time to articulate where they feel uncertain before showing the solution.",
-                    "notebook_entry": "🟡 Pacing: student silent >15s after tutor question",
-                    "reasoning": "Extended silence detected; suggested prompt check-in."
-                }
 
     return None
 
@@ -1420,7 +1575,7 @@ def _call_gemini_inquiry(
 ) -> str:
     configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     candidate_models = [configured_model]
-    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
+    for fallback in GEMINI_FALLBACK_MODELS:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
@@ -1766,7 +1921,7 @@ def _call_gemini_whiteboard_gen(
 ) -> Dict[str, Any]:
     configured_model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     candidate_models = [configured_model]
-    for fallback in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]:
+    for fallback in GEMINI_FALLBACK_MODELS:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 

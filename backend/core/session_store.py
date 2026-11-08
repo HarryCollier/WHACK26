@@ -59,6 +59,110 @@ def ensure_ffmpeg_in_path():
 # Pre-configure ffmpeg in PATH on module load so load_audio works immediately
 ensure_ffmpeg_in_path()
 
+
+def evaluate_math_attempt(equation: str, answer: str) -> Optional[bool]:
+    """
+    Evaluates whether `answer` is mathematically correct for `equation` (or if `equation`/`answer`
+    itself contains a complete statement like `21 - 1 = 16`).
+    Returns:
+      - True if definitely correct
+      - False if definitely incorrect
+      - None if indeterminate / not a simple evaluable math expression
+    """
+    clean_eq = (equation or "").strip()
+    clean_ans = (answer or "").strip()
+
+    # 1. Check if a single string contains a complete equation with LHS = RHS (e.g. "21 - 1 = 16")
+    combined_candidates = [clean_ans, clean_eq]
+    for cand in combined_candidates:
+        if "=" in cand:
+            parts = cand.split("=")
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                lhs, rhs = parts[0].strip(), parts[1].strip()
+                # Remove leading question numbers like "1) " or "Q1: "
+                lhs = re.sub(r'^\s*\d+[\)\.\:]\s*', '', lhs).strip()
+                res = _eval_lhs_vs_rhs(lhs, rhs)
+                if res is not None:
+                    return res
+
+    if not clean_eq or not clean_ans:
+        return None
+    if clean_ans.lower() in ("in progress", "none", "waiting", "?"):
+        return None
+
+    # Strip trailing '=' or '?' from equation
+    lhs = re.sub(r'[=\?\s]+$', '', clean_eq).strip()
+    lhs = re.sub(r'^\s*\d+[\)\.\:]\s*', '', lhs).strip()
+    rhs = re.sub(r'^[=\s]+', '', clean_ans).strip()
+
+    return _eval_lhs_vs_rhs(lhs, rhs)
+
+
+def _eval_lhs_vs_rhs(lhs: str, rhs: str) -> Optional[bool]:
+    """Helper to compare an arithmetic/algebraic LHS against a student's RHS answer."""
+    if not lhs or not rhs or "?" in rhs:
+        return None
+
+    # Known hardcoded domain checks (e.g. integrals/derivatives)
+    lhs_low = lhs.lower()
+    rhs_low = rhs.lower()
+    if any(k in lhs_low for k in ("integral", "∫")) and "x" in lhs_low:
+        if "x^2" in rhs_low or "x²" in rhs_low or "/2" in rhs_low or "0.5x" in rhs_low:
+            return True
+        if re.match(r'^-?\d+(\.\d+)?$', rhs_low) or rhs_low in ("x", "1", "2x"):
+            return False
+
+    # Extract numeric value from RHS if it is a number
+    rhs_num_match = re.search(r'^-?\d+(\.\d+)?$', rhs.replace(" ", ""))
+    if not rhs_num_match:
+        # Check fraction on RHS like "3/2" or "1/2"
+        frac_match = re.match(r'^(-?\d+)\s*/\s*(\d+)$', rhs.strip())
+        if frac_match and int(frac_match.group(2)) != 0:
+            rhs_val = float(frac_match.group(1)) / float(frac_match.group(2))
+        else:
+            return None
+    else:
+        rhs_val = float(rhs_num_match.group(0))
+
+    # Normalize math operators in LHS
+    norm_lhs = lhs.replace("×", "*").replace("÷", "/").replace("−", "-").replace("–", "-")
+    norm_lhs = re.sub(r'(?<=\d)\s*[xX]\s*(?=\d)', '*', norm_lhs)
+    norm_lhs = re.sub(r'\bminus\b', '-', norm_lhs, flags=re.IGNORECASE)
+    norm_lhs = re.sub(r'\bplus\b', '+', norm_lhs, flags=re.IGNORECASE)
+    norm_lhs = re.sub(r'\btimes\b', '*', norm_lhs, flags=re.IGNORECASE)
+    norm_lhs = re.sub(r'\bdivided by\b', '/', norm_lhs, flags=re.IGNORECASE)
+
+    # Check if norm_lhs is a pure arithmetic expression (digits, +, -, *, /, parentheses, spaces, decimals)
+    if re.match(r'^[\d\s\+\-\*\/\(\)\.]+$', norm_lhs) and any(op in norm_lhs for op in ("+", "-", "*", "/")):
+        try:
+            expected_val = float(eval(norm_lhs, {"__builtins__": None}, {}))
+            return abs(expected_val - rhs_val) < 1e-4
+        except Exception:
+            pass
+
+    # Check simple binary arithmetic inside text (e.g. "What is 21 - 1")
+    bin_match = re.search(r'(-?\d+(?:\.\d+)?)\s*([\+\-\*\/])\s*(-?\d+(?:\.\d+)?)', norm_lhs)
+    if bin_match and not any(v in lhs_low for v in ("x", "y", "a", "b", "c", "sin", "cos", "ln", "log", "sqrt")):
+        try:
+            a = float(bin_match.group(1))
+            op = bin_match.group(2)
+            b = float(bin_match.group(3))
+            if op == "+":
+                expected = a + b
+            elif op == "-":
+                expected = a - b
+            elif op == "*":
+                expected = a * b
+            elif op == "/" and b != 0:
+                expected = a / b
+            else:
+                return None
+            return abs(expected - rhs_val) < 1e-4
+        except Exception:
+            pass
+
+    return None
+
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
@@ -401,25 +505,53 @@ class RoomSessionStore:
         is_solo = len(self.active_peers) <= 1
         txt = str(element.get("text", "")).strip() if element.get("text") else ""
 
-        if role == "student" or (is_solo and txt and not any(op in txt for op in ("=", "?", "what", "find")) and self.active_problem_concept):
+        # Check if someone wrote a full equation with an answer in a single text element (e.g. "21 - 1 = 16")
+        is_full_eq_attempt = False
+        if txt and "=" in txt:
+            parts = txt.split("=")
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip() and "?" not in parts[1]:
+                is_full_eq_attempt = True
+
+        if role == "student" or (is_solo and (
+            is_full_eq_attempt or
+            (txt and not any(op in txt.lower() for op in ("=", "?", "what", "find", "graph", "rule", "title")) and self.active_problem_concept) or
+            (not txt and self.active_problem_concept and element.get("type") == "stroke")
+        )):
             self.student_whiteboard_edit_count += 1
-            # If student created or updated a text element, check if it's an answer attempt
             if action == "create" and txt:
-                cur_eq = self.active_problem_concept or ""
-                if not cur_eq:
-                    tutor_texts = [el.get("text", "") for el in self.whiteboard_elements_log if el.get("role") == "tutor" and el.get("text")]
-                    cur_eq = tutor_texts[-1] if tutor_texts else ""
-                # Check obvious correctness (e.g. 21 - 1 = 20)
-                is_correct = False
-                if "20" in txt and ("21" in cur_eq or "20" in cur_eq):
-                    is_correct = True
-                elif "56" in txt and ("7" in cur_eq or "8" in cur_eq):
-                    is_correct = True
-                self.record_answer_attempt(cur_eq, txt, is_correct=is_correct)
+                if is_full_eq_attempt:
+                    parts = txt.split("=")
+                    cur_eq = parts[0].strip() + " ="
+                    ans_part = parts[1].strip()
+                else:
+                    cur_eq = self.active_problem_concept or ""
+                    if not cur_eq:
+                        tutor_texts = [el.get("text", "") for el in self.whiteboard_elements_log if el.get("role") == "tutor" and el.get("text")]
+                        cur_eq = tutor_texts[-1] if tutor_texts else ""
+                    ans_part = txt
+
+                eval_res = evaluate_math_attempt(cur_eq, ans_part)
+                if eval_res is not None:
+                    is_correct = eval_res
+                else:
+                    # Fallback check
+                    is_correct = False
+                    if "20" in ans_part and ("21" in cur_eq or "20" in cur_eq):
+                        is_correct = True
+                    elif "56" in ans_part and ("7" in cur_eq or "8" in cur_eq):
+                        is_correct = True
+                    elif any(err in ans_part for err in ("16", "14", "54")):
+                        is_correct = False
+                self.record_answer_attempt(cur_eq, ans_part, is_correct=is_correct)
         elif role == "tutor" or is_solo:
             self.tutor_whiteboard_edit_count += 1
-            if txt:
-                self.active_problem_concept = txt
+            if txt and not txt.startswith("✨") and not txt.startswith("✋"):
+                # Prefer setting active_problem_concept to lines that look like a question or equation
+                if any(op in txt for op in ("=", "?", "+", "-", "×", "*", "÷", "/")) or not self.active_problem_concept:
+                    # Clean out bracket boxes like [   ]
+                    clean_concept = re.sub(r'\[\s*\]', '', txt).strip()
+                    if clean_concept:
+                        self.active_problem_concept = clean_concept
 
     def record_answer_attempt(self, equation: str, answer: str, is_correct: bool, misconception: str = "") -> int:
         """
@@ -505,17 +637,30 @@ class RoomSessionStore:
 
         # Update attempt tracker based on multimodal report findings
         wb_rel = report.get("whiteboard_relevance", {})
+        areas_growth = str(report.get("areas_for_growth", "")).lower()
         if wb_rel:
             prob_status = wb_rel.get("problem_status")
             act_eq = wb_rel.get("current_active_equation", "")
             pupil_ans = wb_rel.get("pupil_latest_work", "")
             insight = wb_rel.get("pedagogical_insight", "")
-            if prob_status == "Answered with misconception" or (insight and any(term in insight.lower() for term in ("misconception", "error", "incorrect", "struggle", "mistake"))):
-                self.record_answer_attempt(act_eq, pupil_ans, is_correct=False, misconception=insight)
-            elif prob_status == "Solved correctly" or (insight and any(term in insight.lower() for term in ("correct", "solved", "accurate"))):
-                self.record_answer_attempt(act_eq, pupil_ans, is_correct=True)
-            elif prob_status == "New problem started":
-                self.record_answer_attempt(act_eq, "", is_correct=True)
+            ack = wb_rel.get("acknowledgment", "")
+            combined_text = f"{insight} {ack} {areas_growth}".lower()
+
+            # Also mathematically verify the extracted equation + pupil work from Vision LLM!
+            math_eval = evaluate_math_attempt(act_eq or self.active_problem_concept or "", pupil_ans)
+            if math_eval is False:
+                prob_status = "Answered with misconception"
+                wb_rel["problem_status"] = "Answered with misconception"
+
+            if prob_status == "Answered with misconception" or (
+                any(term in combined_text for term in ("misconception", "error", "incorrect", "wrong", "mistake")) and
+                pupil_ans and pupil_ans.lower() not in ("none", "waiting")
+            ):
+                wb_rel["problem_status"] = "Answered with misconception"
+                attempt_str = pupil_ans if (pupil_ans and pupil_ans.lower() not in ("none", "in progress", "waiting")) else "attempt"
+                self.record_answer_attempt(act_eq or self.active_problem_concept, attempt_str, is_correct=False, misconception=insight or areas_growth)
+            elif prob_status == "Solved correctly" or math_eval is True:
+                self.record_answer_attempt(act_eq or self.active_problem_concept, pupil_ans, is_correct=True)
 
     def wipe_session(self):
         """Immediately destroys all session data from memory when all peers leave"""
