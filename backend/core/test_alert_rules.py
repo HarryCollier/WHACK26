@@ -138,5 +138,65 @@ class TutorAlertRulesTest(unittest.TestCase):
         self.assertEqual(nudge["tier"], "T3")
         self.assertIn(nudge["context_badge"], ("🎯 Board Detection", "Spoken Confusion"))
 
+    def test_calculus_integral_dynamic_intervention(self):
+        """Calculus integrals on board must dynamically produce calculus power rule and never 5s and 2s."""
+        from core.llm_coach import build_pedagogical_interventions
+        intervention = build_pedagogical_interventions("integral of x dx =")
+        stepping_stone = intervention["stepping_stone"].lower()
+        counter_example = intervention["counter_example"].lower()
+
+        # Must not contain hardcoded 5s and 2s
+        self.assertNotIn("5s and 2s", stepping_stone)
+        self.assertNotIn("5s and 2s", counter_example)
+        self.assertNotIn("friendly 5s", stepping_stone)
+
+        # Must be tailored to calculus / power rule / antiderivative
+        self.assertTrue(
+            "power rule" in stepping_stone or "integral" in stepping_stone or "antiderivative" in stepping_stone,
+            f"Expected calculus concepts, got: {stepping_stone}"
+        )
+        self.assertEqual(intervention["example_type"], "calculus_integral")
+
+    def test_positive_nudges_are_removed(self):
+        """Positive nudges ('Solved correctly', 'New problem started') must never produce a live toast."""
+        import time
+        store = RoomSessionStore("TEST_POSITIVE_REMOVAL")
+        now = int(time.time() * 1000)
+        store.last_coaching_timestamp = now - 5000
+        store.last_coaching_report = {
+            "whiteboard_relevance": {
+                "current_active_equation": "21 - 1 = 20",
+                "pupil_latest_work": "20",
+                "problem_status": "Solved correctly",
+                "acknowledgment": "Great job solving correctly!",
+                "student_active_on_board": False
+            }
+        }
+        nudge = generate_live_nudge(store)
+        self.assertIsNone(nudge, "Positive 'Solved correctly' should not generate a nudge toast.")
+
+        # Test new problem started
+        store.last_coaching_report["whiteboard_relevance"]["problem_status"] = "New problem started"
+        nudge = generate_live_nudge(store)
+        self.assertIsNone(nudge, "Positive 'New problem started' should not generate a nudge toast.")
+
+    def test_nudge_rate_limiting_raises_the_bar(self):
+        """A nudge fired within 40 seconds of a previous nudge is suppressed to avoid spamming the tutor."""
+        import time
+        store = RoomSessionStore("TEST_RATE_LIMIT")
+        now = int(time.time() * 1000)
+        # Simulate that a nudge fired 10 seconds ago
+        store.last_nudge_timestamp = now - 10000
+
+        # Even with spoken confusion, the global rate limiter must hold
+        store.transcripts.append(TranscriptEntry(
+            role="student",
+            client_id="student_1",
+            timestamp=now - 2000,
+            text="wait what I don't understand"
+        ))
+        nudge = generate_live_nudge(store)
+        self.assertIsNone(nudge, "Nudge should be suppressed within 40s cooldown.")
+
 if __name__ == "__main__":
     unittest.main()

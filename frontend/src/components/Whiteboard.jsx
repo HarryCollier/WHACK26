@@ -1002,15 +1002,147 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         fontWeight: 'bold'
       });
 
+    } else if (normType.includes('integral') || normType.includes('calculus')) {
+      cardTitle = '∫ Calculus: Reverse Power Rule';
+      cardSummary = '∫ xⁿ dx = (xⁿ⁺¹)/(n + 1) + C';
+      boxW = 540;
+      boxH = 320;
+
+      items.push({
+        type: 'text',
+        text: '📐 Rule:  ∫ xⁿ dx = (xⁿ⁺¹) / (n + 1) + C   (for n ≠ -1)',
+        x: 30,
+        y: 80,
+        color: '#2563eb',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 1: Identify power: x = x¹ (so n = 1)',
+        x: 30,
+        y: 112,
+        color: '#1e293b',
+        fontSize: 13
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 2: Add 1 to the exponent: 1 + 1 = 2',
+        x: 30,
+        y: 140,
+        color: '#1e293b',
+        fontSize: 13
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 3: Divide by new exponent & add constant: (x²)/2 + C',
+        x: 30,
+        y: 168,
+        color: '#059669',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+      items.push({
+        type: 'text',
+        text: '💡 Check by differentiating: d/dx [(1/2)x² + C] = x',
+        x: 30,
+        y: 198,
+        color: '#7c3aed',
+        fontSize: 12
+      });
+
+      // Pupil Working Area Box
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 30, y: 225 },
+        end: { x: 510, y: 285 },
+        color: '#059669',
+        fillColor: '#f0fdf4',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: '✏️ Try it: ∫ x dx = __________ + C',
+        x: 50,
+        y: 260,
+        color: '#059669',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+
+    } else if (normType.includes('algebra') || normType.includes('balance') || normType.includes('equation')) {
+      cardTitle = '⚖️ Algebra: Equation Balance Scale';
+      cardSummary = 'Perform the inverse operation on both sides';
+      boxW = 540;
+      boxH = 310;
+
+      items.push({
+        type: 'text',
+        text: '⚖️ Golden Rule: Whatever you do to one side, do to the other!',
+        x: 30,
+        y: 80,
+        color: '#2563eb',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 1: Undo addition / subtraction first',
+        x: 30,
+        y: 112,
+        color: '#1e293b',
+        fontSize: 13
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 2: Undo multiplication / division to isolate the variable',
+        x: 30,
+        y: 140,
+        color: '#1e293b',
+        fontSize: 13
+      });
+      items.push({
+        type: 'text',
+        text: 'Step 3: Check by substituting your value back into original equation',
+        x: 30,
+        y: 168,
+        color: '#059669',
+        fontSize: 13,
+        fontWeight: 'bold'
+      });
+
+      // Pupil Working Area Box
+      items.push({
+        type: 'shape',
+        shapeType: 'rectangle',
+        start: { x: 30, y: 210 },
+        end: { x: 510, y: 275 },
+        color: '#059669',
+        fillColor: '#f0fdf4',
+        size: 1.5
+      });
+      items.push({
+        type: 'text',
+        text: '✏️ Step-by-step working area: [Isolate x]',
+        x: 50,
+        y: 250,
+        color: '#059669',
+        fontSize: 14,
+        fontWeight: 'bold'
+      });
+
     } else {
       // General Nudge / Hint / Solution from toastData
       const category = toastData?.category ? (toastData.category.charAt(0).toUpperCase() + toastData.category.slice(1)) : 'Pedagogical Guidance';
       cardTitle = toastData?.title || `💡 Coach Hint: ${category}`;
       cardSummary = toastData?.toast_text || toastData?.notebook_entry || 'Pedagogical guidance';
-      boxW = 500;
-      boxH = 280;
+      boxW = 520;
+      boxH = 300;
 
       const mainText = toastData?.toast_text || toastData?.notebook_entry || 'Suggested visual prompt / check-in question for pupil.';
+      const steppingStone = toastData?.stepping_stone;
+      const counterExample = toastData?.counter_example;
       const actionText = toastData?.action_label || toastData?.suggestion || 'Guide pupil to explain reasoning step by step';
 
       items.push({
@@ -1026,28 +1158,54 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         type: 'text',
         text: mainText,
         x: 30,
-        y: 110,
+        y: 105,
         color: '#1e293b',
         fontSize: 13,
-        maxWidth: 440
+        maxWidth: 460
       });
-      items.push({
-        type: 'text',
-        text: `👉 Action: ${actionText}`,
-        x: 30,
-        y: 155,
-        color: '#0284c7',
-        fontSize: 13,
-        fontWeight: 'bold',
-        maxWidth: 440
-      });
+
+      if (steppingStone) {
+        items.push({
+          type: 'text',
+          text: `💡 Stepping Stone: ${steppingStone}`,
+          x: 30,
+          y: 138,
+          color: '#0284c7',
+          fontSize: 12,
+          fontWeight: 'bold',
+          maxWidth: 460
+        });
+      }
+
+      if (counterExample) {
+        items.push({
+          type: 'text',
+          text: `🔍 Socratic Prompt: "${counterExample}"`,
+          x: 30,
+          y: 165,
+          color: '#7c3aed',
+          fontSize: 12,
+          maxWidth: 460
+        });
+      } else {
+        items.push({
+          type: 'text',
+          text: `👉 Action: ${actionText}`,
+          x: 30,
+          y: 165,
+          color: '#0284c7',
+          fontSize: 13,
+          fontWeight: 'bold',
+          maxWidth: 460
+        });
+      }
 
       // Pupil Response / Working Area Box
       items.push({
         type: 'shape',
         shapeType: 'rectangle',
-        start: { x: 30, y: 190 },
-        end: { x: 470, y: 245 },
+        start: { x: 30, y: 205 },
+        end: { x: 490, y: 265 },
         color: '#059669',
         fillColor: '#f0fdf4',
         size: 1.5
@@ -1056,7 +1214,7 @@ const Whiteboard = forwardRef(({ onStroke, socket, role = 'tutor', clientId = ''
         type: 'text',
         text: '✏️ Pupil Working Area / Answer: [Write here]',
         x: 45,
-        y: 224,
+        y: 242,
         color: '#059669',
         fontSize: 13,
         fontWeight: 'bold'

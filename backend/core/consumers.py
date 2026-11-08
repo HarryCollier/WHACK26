@@ -347,24 +347,6 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             client_id = content.get("clientId") or element.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(element, role, client_id, action="create")
             store.add_whiteboard_element(element)
-            try:
-                from .llm_coach import generate_live_nudge
-                wb_nudge = generate_live_nudge(store)
-                if wb_nudge:
-                    await self.channel_layer.group_send(
-                        self.room_group_name,
-                        {
-                            "type": "room_broadcast",
-                            "sender_channel": "",
-                            "payload": {
-                                "type": "live_coach_toast",
-                                "data": wb_nudge
-                            }
-                        }
-                    )
-            except Exception as wb_err:
-                logger.debug(f"Whiteboard nudge check error: {wb_err}")
-
             # Automatically trigger background multimodal AI analysis after drawing pause
             self.schedule_student_evaluation(store)
             # Fall-through to broadcast element to other peers in room
@@ -374,24 +356,6 @@ class MeetingRoomConsumer(AsyncJsonWebsocketConsumer):
             role = content.get("role") or stroke.get("role") or self.role or "unknown"
             client_id = content.get("clientId") or stroke.get("clientId") or self.client_id or "unknown"
             store.record_whiteboard_element(stroke, role, client_id, action="create")
-            try:
-                from .llm_coach import generate_live_nudge
-                wb_nudge = generate_live_nudge(store)
-                if wb_nudge:
-                    await self.channel_layer.group_send(
-                        self.room_group_name,
-                        {
-                            "type": "room_broadcast",
-                            "sender_channel": "",
-                            "payload": {
-                                "type": "live_coach_toast",
-                                "data": wb_nudge
-                            }
-                        }
-                    )
-            except Exception as wb_err:
-                logger.debug(f"Whiteboard stroke nudge check error: {wb_err}")
-
             self.schedule_student_evaluation(store)
             # Fall-through to broadcast stroke to other peers in room
 

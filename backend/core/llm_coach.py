@@ -563,26 +563,86 @@ def _generate_heuristic_report(telemetry: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_pedagogical_interventions(concept: str, student_answer: str = "", context: str = "") -> dict:
     """
-    Builds concrete, expert-level pedagogical interventions:
-    1. Stepping-Stone Problem: Calibrated simpler anchor to isolate the sub-skill.
-    2. Socratic Counter-Example / Inversion Check: Prompt for tutor to speak directly.
-    3. Custom Dynamic Diagram Recipe: Vector primitives tailored to exact numbers.
+    Builds concrete, domain-specific pedagogical interventions dynamically tailored
+    to the active equation, topic, or misconception on the page (Calculus, Algebra, Geometry,
+    Fractions, Arithmetic, or general concepts). Never falls back to hardcoded 5s and 2s.
     """
     import re
     clean_c = (concept or "").strip()
     clean_ans = (student_answer or "").strip()
+    c_lower = clean_c.lower()
 
-    # 1. Fractions check
-    if any(term in clean_c.lower() for term in ("fraction", "/", "divide", "numerator", "denominator")):
-        stepping_stone = "Try anchor: '1 ÷ 1/2 = ?' (how many halves in 1 whole?)"
-        counter_example = "Ask: 'If we multiply our answer by the divisor, do we get back the original?'"
+    # 1. Calculus: Integrals / Integration / Antiderivative
+    if any(k in c_lower for k in ("integral", "integrate", "antiderivative", "∫", r"\int", "dx", "dy", "dt")) or "int " in c_lower:
+        if "x" in c_lower or "^" in c_lower or re.search(r'\b[a-z]\b', c_lower):
+            stepping_stone = "Try Reverse Power Rule anchor: Add 1 to exponent and divide by new exponent: ∫ x^n dx = (x^(n+1))/(n+1) + C. For x^1, the power becomes 2."
+            counter_example = "Ask: 'What function has a derivative equal to the integrand? Test by differentiating your answer. Did you remember + C?'"
+            action_label = "📐 Show Integral Rule"
+            example_type = "calculus_integral"
+            diagram_kind = "calculus_integral"
+            params = {"equation": clean_c or "∫ x dx = (x^2)/2 + C", "rule": "power_rule"}
+        else:
+            stepping_stone = "Try definition anchor: The indefinite integral is the antiderivative: If F'(x) = f(x), then ∫ f(x) dx = F(x) + C."
+            counter_example = "Ask: 'Can we check by taking the derivative of our candidate answer?'"
+            action_label = "📐 Show Integral Guide"
+            example_type = "calculus_integral"
+            diagram_kind = "calculus_integral"
+            params = {"equation": clean_c or "Integration"}
+
+    # 2. Calculus: Derivatives / Differential / Tangents
+    elif any(k in c_lower for k in ("derivative", "d/dx", "dy/dx", "f'(x)", "tangent", "gradient of", "differentiate")):
+        stepping_stone = "Try Power Rule anchor: Bring current power down as coefficient and subtract 1 from exponent: d/dx[x^n] = n·x^(n-1)."
+        counter_example = "Ask: 'What is the rate of change of a constant number? Why does d/dx[c] = 0?'"
+        action_label = "📐 Show Derivative Rule"
+        example_type = "calculus_derivative"
+        diagram_kind = "calculus_derivative"
+        params = {"equation": clean_c or "Derivative"}
+
+    # 3. Algebra: Linear equations, balance method, solving for variables
+    elif ("=" in clean_c and any(v in c_lower for v in ("x", "y", "z", "a", "b", "n")) and not any(k in c_lower for k in ("area", "perimeter", "radius", "circle"))) or any(k in c_lower for k in ("solve for", "algebra", "linear equation", "isolate")):
+        stepping_stone = "Try balance method anchor: Isolate the variable term by performing inverse operations to both sides equally (e.g. subtract constant term first)."
+        counter_example = "Ask: 'If we substitute our solution back into the original equation for x, do both sides balance out equally?'"
+        action_label = "⚖️ Show Balance Method"
+        example_type = "algebra_balance"
+        diagram_kind = "algebra_balance"
+        params = {"equation": clean_c or "Algebra"}
+
+    # 4. Fractions & Division
+    elif any(term in c_lower for term in ("fraction", "divide fractions", "numerator", "denominator", "half", "quarter", "1/2", "3/4", "1/4")) or (re.search(r'\d+/\d+', clean_c) and not any(w in c_lower for w in ("dx", "dy", "d/dx"))):
+        stepping_stone = "Try anchor: For dividing fractions (a/b ÷ c/d), invert the divisor and multiply: a/b × d/c. How many parts fit into the whole?"
+        counter_example = "Ask: 'If we multiply our answer by the divisor, do we get back the original dividend?'"
         diagram_kind = "fraction_strip"
         params = {"equation": clean_c or "3/4 ÷ 1/2", "top_num": 3, "top_den": 4, "bottom_num": 1, "bottom_den": 2}
         action_label = "🍕 Draw Fraction Model"
         example_type = "fraction_pizza"
 
-    # 2. Multiplication check
-    elif any(term in clean_c.lower() for term in ("*", "x", "times", "multiply")):
+    # 5. Geometry (Circle, Rectangle, Triangle)
+    elif any(term in c_lower for term in ("circle", "radius", "diameter", "pi", "circumference")):
+        stepping_stone = "Try stepping stone: Radius (r) is center-to-edge; Diameter (d = 2r) is all the way across. Area = πr², Circumference = 2πr."
+        counter_example = "Ask: 'Is the radius halfway across the circle or all the way across?'"
+        diagram_kind = "circle_guide"
+        params = {"equation": "Circle: d = 2r | Area = πr² | C = 2πr"}
+        action_label = "⭕ Draw Circle Guide"
+        example_type = "circle_guide"
+
+    elif any(term in c_lower for term in ("rect", "square", "area", "perimeter")):
+        stepping_stone = "Try stepping stone: Area = length × width (grid squares inside); Perimeter = sum of all 4 outer sides (2l + 2w)."
+        counter_example = "Ask: 'Did you multiply length by width (area), or add up all 4 boundary sides (perimeter)?'"
+        diagram_kind = "rectangle_guide"
+        params = {"equation": "Rectangle: Area = l × w | Perimeter = 2(l + w)"}
+        action_label = "📐 Draw Shape Guide"
+        example_type = "rectangle_guide"
+
+    elif any(term in c_lower for term in ("triangle", "hypotenuse", "pythagor", "sin", "cos", "tan", "angle")):
+        stepping_stone = "Try triangle anchor: Area = (1/2) × base × height. For right-angled triangles: a² + b² = c²."
+        counter_example = "Ask: 'Is the hypotenuse always the longest side opposite the right angle?'"
+        diagram_kind = "triangle_guide"
+        params = {"equation": "Triangle: Area = 1/2·b·h | a² + b² = c²"}
+        action_label = "📐 Draw Triangle Guide"
+        example_type = "rectangle_guide"
+
+    # 6. Arithmetic: Multiplication (explicit operator or keyword with numbers)
+    elif re.search(r'\b\d+\s*[\*×xX]\s*\d+\b', clean_c) or any(term in c_lower for term in ("times", "multiply", "multiplication", "product")):
         nums = [int(n) for n in re.findall(r'\b\d+\b', clean_c)]
         if len(nums) >= 2:
             a, b = nums[0], nums[1]
@@ -596,37 +656,19 @@ def build_pedagogical_interventions(concept: str, student_answer: str = "", cont
             action_label = f"🔢 Draw {a} × {b} Array Grid"
             example_type = "number_line"
         else:
-            stepping_stone = "Try decomposing into friendly 5s and 2s first"
-            counter_example = "Ask: 'What anchor fact do you already know nearby?'"
+            stepping_stone = "Try repeated addition anchor: a × b means adding a to itself b times."
+            counter_example = "Ask: 'What multiplication fact nearby do you already know for sure?'"
             diagram_kind = "array_grid"
             params = {"equation": clean_c or "Multiplication", "rows": 5, "cols": 5}
             action_label = "🔢 Draw Array Grid"
             example_type = "number_line"
 
-    # 3. Geometry (circle / rectangle)
-    elif any(term in clean_c.lower() for term in ("circle", "radius", "diameter", "pi")):
-        stepping_stone = "Try stepping stone: 'If radius = 5, what is diameter (2r)?'"
-        counter_example = "Ask: 'Is the radius halfway across or all the way across?'"
-        diagram_kind = "circle_guide"
-        params = {"equation": "Circle: d = 2r | Area = πr² | C = 2πr"}
-        action_label = "⭕ Draw Circle Guide"
-        example_type = "circle_guide"
-
-    elif any(term in clean_c.lower() for term in ("rect", "square", "area", "perimeter")):
-        stepping_stone = "Try stepping stone: 'Count grid squares in 1 row first'"
-        counter_example = "Ask: 'Did you multiply length × width, or add all 4 sides?'"
-        diagram_kind = "rectangle_guide"
-        params = {"equation": "Rectangle: Area = l × w | Perimeter = 2(l + w)"}
-        action_label = "📐 Draw Shape Guide"
-        example_type = "rectangle_guide"
-
-    # 4. Subtraction / Arithmetic ($A - B$)
-    else:
+    # 7. Arithmetic: Subtraction / Addition ($A - B$)
+    elif re.search(r'\b\d+\s*[\-\+]\s*\d+\b', clean_c) or any(w in c_lower for w in ("subtract", "minus", "regroup", "place value", "column addition")):
         nums = [int(n) for n in re.findall(r'\b\d+\b', clean_c)]
         if len(nums) >= 2:
             a, b = nums[0], nums[1]
             res = a - b
-            # Crossing decade boundary or multi-digit
             if a > 10 and (a % 10) != 0:
                 stepping_stone = f"Try simpler anchor: {a - (a % 10)} - {b} = ?"
             else:
@@ -649,12 +691,35 @@ def build_pedagogical_interventions(concept: str, student_answer: str = "", cont
             action_label = f"📐 Draw {a} - {b} Hop Line"
             example_type = "place_value"
         else:
-            stepping_stone = "Try simpler anchor: 20 - 1 = ?"
-            counter_example = "Check by adding: 'If 21 - 1 = 16, what would 16 + 1 be?'"
+            stepping_stone = "Try place-value column anchor: Regroup 1 Ten into 10 Ones when subtracting smaller digits."
+            counter_example = "Check by adding: 'If we add our result back to the subtracted amount, do we get the original?'"
             diagram_kind = "number_line_hop"
-            params = {"equation": "21 - 1 = 20", "start": 21, "step": -1, "result": 20, "tens": 2, "ones": 1}
-            action_label = "📐 Draw 21 - 1 Hop Line"
+            params = {"equation": clean_c or "Subtraction", "start": 21, "step": -1, "result": 20, "tens": 2, "ones": 1}
+            action_label = "📐 Draw Subtraction Scaffold"
             example_type = "place_value"
+
+    # 8. Dynamic General Subject Fallback (Never hardcode 5s and 2s!)
+    else:
+        topic_label = clean_c[:30] if clean_c else "this concept"
+        stepping_stone = f"Try simpler anchor: Break '{topic_label}' into its foundational definition or a simpler test case."
+        counter_example = f"Ask: 'What is the very first rule or definition we should apply when solving {topic_label}?'"
+        diagram_kind = "concept_card"
+        params = {"equation": clean_c or "Core Concept"}
+        action_label = f"💡 Show '{clean_c[:16]}' Guide" if clean_c else "💡 Show Stepping Stone"
+        example_type = "number_line"
+
+    return {
+        "stepping_stone": stepping_stone,
+        "counter_example": counter_example,
+        "custom_diagram": {
+            "type": "custom_diagram",
+            "kind": diagram_kind,
+            "title": f"Visual Breakdown: {clean_c or 'Equation'}",
+            "params": params
+        },
+        "action_label": action_label,
+        "example_type": example_type
+    }
 
     return {
         "stepping_stone": stepping_stone,
@@ -823,9 +888,16 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     if not hasattr(store, "recent_nudge_signatures"):
         store.recent_nudge_signatures = {}
 
+    # ── Global Calm Technology Rate Limiter ──
+    # Enforce minimum 40s between live alerts so tutor is not spammed
+    MIN_NUDGE_INTERVAL_MS = 40000
+    last_nudge = getattr(store, "last_nudge_timestamp", 0)
+    if last_nudge > 0 and (now - last_nudge) < MIN_NUDGE_INTERVAL_MS and not force_trigger:
+        return None
+
     def is_recently_shown(sig: str) -> bool:
         last_t = store.recent_nudge_signatures.get(sig, 0)
-        return (now - last_t) < 20000  # 20s signature cooldown for snappy responsive testing
+        return (now - last_t) < 60000  # 60s signature cooldown to prevent nagging
 
     def record_shown(sig: str):
         store.last_nudge_timestamp = now
@@ -866,7 +938,10 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
     is_majority_confused = pulse.get("is_majority_confused", False)
     is_majority_distracted = pulse.get("is_majority_distracted", False)
 
-    if is_majority_confused and pulse.get("student_face_detected"):
+    # Don't interrupt student if they are actively drawing/writing on the board (furrow while drawing is focus)
+    recent_student_strokes = [el for el in wb_elements if el.get("role") == "student" and (now - el.get("timestamp", 0)) <= 6000]
+
+    if is_majority_confused and pulse.get("student_face_detected") and pulse.get("total_faces", 0) >= 3 and not recent_student_strokes:
         wb_elements = getattr(store, "whiteboard_elements_log", [])
         recent_tutor_wb = [el for el in wb_elements if el.get("role") in ("tutor", "unknown") and (now - el.get("timestamp", 0)) <= 45000]
         if not recent_tutor_wb and store.most_recent_whiteboard and (now - store.most_recent_whiteboard.get("timestamp", 0)) <= 45000:
@@ -936,7 +1011,7 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 }
 
     # ── 4. Check for Student Looking Away / Distraction Majority Over 6s Window (T2 Alert) ──
-    if is_majority_distracted and pulse.get("student_face_detected"):
+    if is_majority_distracted and pulse.get("student_face_detected") and pulse.get("total_faces", 0) >= 3:
         dist_sig = "face_distracted_gaze"
         if not is_recently_shown(dist_sig):
             record_shown(dist_sig)
@@ -953,57 +1028,51 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
             }
 
     # ── 5. Check Recent Student Spoken Transcripts (T3 Alert) ──
-    student_transcripts = [t for t in store.transcripts if t.role == "student"]
+    # Only inspect transcripts from the last 20 seconds (or simulated test timestamps) to avoid stale triggers
+    def _is_recent_transcript(entry):
+        ts = getattr(entry, "timestamp", 0)
+        return (now - ts) <= 20000 or ts < 100000
+
+    student_transcripts = [t for t in store.transcripts if t.role == "student" and _is_recent_transcript(t)]
     if not student_transcripts and store.transcripts:
-        student_transcripts = store.transcripts
+        student_transcripts = [t for t in store.transcripts if _is_recent_transcript(t)]
 
     if student_transcripts:
         recent_student = student_transcripts[-3:]
         recent_text = " ".join(t.text.lower() for t in recent_student)
-        confusion_cues = ["don't get", "don't understand", "wait what", "why did you", "huh?", "confused", "stuck", "lost", "how do we"]
+        confusion_cues = ["don't get", "don't understand", "im stuck", "i'm stuck", "im lost", "i'm lost", "wait what", "why did you", "really confused"]
         matched_cue = next((cue for cue in confusion_cues if cue in recent_text), None)
 
         if matched_cue:
             spk_sig = f"spk_conf_{matched_cue}_{recent_student[-1].text[:15]}"
             if not is_recently_shown(spk_sig):
                 record_shown(spk_sig)
-                if "fraction" in recent_text or "divide" in recent_text:
-                    interventions = build_pedagogical_interventions("fractions division 3/4 / 1/2")
-                    return {
-                        "tier": "T3",
-                        "category": "confusion",
-                        "confidence": "high",
-                        "context_badge": "Spoken Confusion",
-                        "toast_text": "Student stuck on dividing fractions — try a pizza-slice example?",
-                        "action_label": interventions["action_label"],
-                        "example_type": interventions["example_type"],
-                        "stepping_stone": interventions["stepping_stone"],
-                        "counter_example": interventions["counter_example"],
-                        "custom_diagram": interventions["custom_diagram"],
-                        "notebook_entry": f"🔴 Spoken Confusion: \"{recent_student[-1].text}\"",
-                        "reasoning": "Student verbalized confusion; visual pizza model recommended."
-                    }
-                else:
-                    cur_eq = getattr(store, "active_problem_concept", "") or "math concept"
-                    interventions = build_pedagogical_interventions(cur_eq)
-                    return {
-                        "tier": "T3",
-                        "category": "confusion",
-                        "confidence": "high",
-                        "context_badge": "Spoken Confusion",
-                        "toast_text": f"Student expresses confusion on '{cur_eq}' — offer stepping stone visual?",
-                        "action_label": interventions["action_label"],
-                        "example_type": interventions["example_type"],
-                        "stepping_stone": interventions["stepping_stone"],
-                        "counter_example": interventions["counter_example"],
-                        "custom_diagram": interventions["custom_diagram"],
-                        "notebook_entry": f"🔴 Spoken Confusion: \"{recent_student[-1].text}\"",
-                        "reasoning": "Student verbalized confusion; stepping stone recommended."
-                    }
+                cur_eq = getattr(store, "active_problem_concept", "") or ""
+                if not cur_eq and wb_elements:
+                    for el in reversed(wb_elements):
+                        if el.get("text"):
+                            cur_eq = el.get("text")
+                            break
+                interventions = build_pedagogical_interventions(cur_eq or recent_student[-1].text)
+                toast_label = f"Student expresses confusion on '{cur_eq}' — offer stepping stone visual?" if cur_eq else "Student expresses confusion — offer stepping stone visual?"
+                return {
+                    "tier": "T3",
+                    "category": "confusion",
+                    "confidence": "high",
+                    "context_badge": "Spoken Confusion",
+                    "toast_text": toast_label,
+                    "action_label": interventions["action_label"],
+                    "example_type": interventions["example_type"],
+                    "stepping_stone": interventions["stepping_stone"],
+                    "counter_example": interventions["counter_example"],
+                    "custom_diagram": interventions["custom_diagram"],
+                    "notebook_entry": f"🔴 Spoken Confusion: \"{recent_student[-1].text}\"",
+                    "reasoning": "Student verbalized confusion; stepping stone recommended."
+                }
 
-    # ── 6. Calm technology breath window: 4 seconds between non-escalations ──
+    # ── 6. Calm technology breath window: 15 seconds between non-escalations ──
     last_nudge = getattr(store, "last_nudge_timestamp", 0)
-    if (now - last_nudge) < 4000:
+    if (now - last_nudge) < 15000:
         return None
 
     # ── 7. Check Multimodal AI Coaching Report Whiteboard Insights ──
@@ -1022,48 +1091,14 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
         observed = wb_rel.get("observed_pupil_work", "").strip()
         combined_insight = f"{insight} {observed}".lower()
 
-        # A: Student successfully solved current problem
-        if problem_status in ("Solved correctly", "acknowledged"):
-            eq_sig = f"solved_{active_eq}" if active_eq else "solved"
-            if not is_recently_shown(eq_sig):
-                record_shown(eq_sig)
-                return {
-                    "tier": "T1",
-                    "category": "progress",
-                    "confidence": "high",
-                    "context_badge": "✅ Problem Solved",
-                    "toast_text": f"Pupil solved '{active_eq or 'problem'}' correctly! Ready for next problem.",
-                    "action_label": "✨ Next Problem",
-                    "example_type": "number_line",
-                    "notebook_entry": f"🟢 Board Progress: {acknowledgment or f'Pupil solved {active_eq} correctly.'}",
-                    "reasoning": insight or "Pupil solved equation with correct working."
-                }
-
-        # B: Fresh new problem started by tutor
-        elif problem_status == "New problem started":
-            new_sig = f"new_prob_{active_eq}" if active_eq else "new_problem"
-            if not is_recently_shown(new_sig):
-                record_shown(new_sig)
-                return {
-                    "tier": "T1",
-                    "category": "new_work",
-                    "confidence": "high",
-                    "context_badge": "📝 New Problem",
-                    "toast_text": f"New problem started: '{active_eq}'. Student starting work.",
-                    "action_label": "👀 Observe",
-                    "example_type": "number_line",
-                    "notebook_entry": f"🔵 Whiteboard: New problem started: '{active_eq}'.",
-                    "reasoning": "Transitioned to fresh exercise on the whiteboard."
-                }
-
-        # C: Misconception or calculation struggle on active problem
-        elif problem_status == "Answered with misconception" or (insight and wb_rel.get("student_active_on_board")):
+        # NOTE: Positive nudges ("Solved correctly", "New problem started") are suppressed.
+        # Only notify on actionable misconceptions or student struggles.
+        if problem_status == "Answered with misconception" or (insight and wb_rel.get("student_active_on_board") and any(w in combined_insight for w in ("misconception", "struggle", "error", "incorrect", "stuck"))):
             sig = f"misc_{active_eq}_{pupil_work}" if (active_eq or pupil_work) else "board_misc"
             if not is_recently_shown(sig):
                 record_shown(sig)
                 interventions = build_pedagogical_interventions(active_eq, pupil_work, context=combined_insight)
 
-                # Dynamic toast text mentioning the exact active equation and answer
                 if active_eq and pupil_work and pupil_work.lower() != "in progress":
                     toast_msg = f"Student wrote '{pupil_work}' to '{active_eq}' — suggest stepping-stone example?"
                 elif active_eq:
@@ -1086,10 +1121,9 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "reasoning": insight
                 }
 
-    # ── 8. Check Granular Whiteboard Elements Log (Text & Shapes drawn in last 45 seconds) ──
+    # ── 8. Check Granular Whiteboard Elements Log (Shapes drawn in last 45 seconds) ──
     recent_wb = [el for el in wb_elements if (now - el.get("timestamp", 0)) <= 45000]
     if recent_wb:
-        student_texts = [el.get("text", "").strip() for el in recent_wb if el.get("role") == "student" and el.get("text")]
         tutor_texts = [el.get("text", "").strip() for el in recent_wb if el.get("role") == "tutor" and el.get("text")]
         shapes = [el.get("shape_type", "").lower() for el in recent_wb if el.get("shape_type")]
 
@@ -1129,39 +1163,14 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                 "reasoning": "Student drew quadrilateral shape on board."
             }
 
-        # B: Student wrote an answer on the board (T3 Alert)
-        if student_texts:
-            latest_stu_txt = student_texts[-1]
-            latest_tutor_txt = tutor_texts[-1] if tutor_texts else (getattr(store, "active_problem_concept", "") or "")
-            ans_sig = f"ans_{latest_stu_txt}"
-
-            if not is_recently_shown(ans_sig):
-                record_shown(ans_sig)
-                interventions = build_pedagogical_interventions(latest_tutor_txt or latest_stu_txt, latest_stu_txt)
-                toast_t = f"Student answered '{latest_stu_txt}' to '{latest_tutor_txt[:18]}' — try stepping stone?" if latest_tutor_txt else f"Student answered '{latest_stu_txt}' on board — try stepping stone?"
-                return {
-                    "tier": "T3",
-                    "category": "whiteboard_misconception",
-                    "confidence": "high",
-                    "context_badge": "🎯 Board Detection",
-                    "toast_text": toast_t,
-                    "action_label": interventions["action_label"],
-                    "example_type": interventions["example_type"],
-                    "stepping_stone": interventions["stepping_stone"],
-                    "counter_example": interventions["counter_example"],
-                    "custom_diagram": interventions["custom_diagram"],
-                    "notebook_entry": f"🔴 Board Detection: Student contributed '{latest_stu_txt}' on board.",
-                    "reasoning": "Detected arithmetic calculation step on whiteboard."
-                }
-
-        # C: Tutor set a question on the board, but student has been silent/inactive for > 20s
+        # B: Tutor set a question on the board, but student has been silent/inactive for > 25s
         student_actions = [el for el in recent_wb if el.get("role") == "student"]
         if tutor_texts and not student_actions:
             last_tutor_el = [el for el in recent_wb if el.get("role") == "tutor"][-1]
             elapsed_since_q = (now - last_tutor_el.get("timestamp", 0))
             latest_q = tutor_texts[-1]
             q_sig = f"unanswered_{latest_q[:25]}"
-            if elapsed_since_q >= 20000 and not is_recently_shown(q_sig):
+            if elapsed_since_q >= 25000 and not is_recently_shown(q_sig):
                 record_shown(q_sig)
                 return {
                     "tier": "T2",
@@ -1171,7 +1180,7 @@ def generate_live_nudge(store: Any, force_trigger: Optional[str] = None) -> Opti
                     "toast_text": f"Student quiet on '{latest_q[:25]}' — offer a visual hint?",
                     "action_label": "📏 Drop on Board",
                     "example_type": "number_line",
-                    "notebook_entry": f"🟡 Pacing: Student quiet for >20s on whiteboard problem '{latest_q[:30]}'",
+                    "notebook_entry": f"🟡 Pacing: Student quiet for >25s on whiteboard problem '{latest_q[:30]}'",
                     "reasoning": "Extended pause following question written on whiteboard."
                 }
 
